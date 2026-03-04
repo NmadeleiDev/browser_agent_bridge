@@ -18,16 +18,19 @@
       <label>
         Instance ID
         <input id="instanceId" placeholder="instance-1" />
+        <span class="hint">Groups this browser under one environment/workflow (for example, <code>local-dev</code>).</span>
       </label>
 
       <label>
         Client ID
         <input id="clientId" placeholder="chrome-main" />
+        <span class="hint">Identifies this specific browser inside the instance (for example, <code>chrome-main</code>).</span>
       </label>
 
       <label>
         Auth Token / JWT
         <input id="authToken" placeholder="token or jwt" />
+        <span class="hint security">Security: ask your agent to generate a strong token before use (16+ chars, upper/lowercase, number, symbol). Do not reuse demo tokens.</span>
       </label>
 
       <div class="buttons">

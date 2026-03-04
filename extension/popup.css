@@ -25,6 +25,26 @@ label {
   margin-bottom: 10px;
 }
 
+.hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #5d6883;
+}
+
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 10px;
+  background: #eef1f8;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.hint.security {
+  color: #3f4a62;
+}
+
 input {
   width: 100%;
   margin-top: 4px;
