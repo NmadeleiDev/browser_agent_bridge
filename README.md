@@ -1,6 +1,6 @@
 # browser-agent-bridge
 
-WebSocket-only browser bridge for remotely controlling a local Chrome extension.
+WebSocket-only browser bridge for remotely controlling a local Chrome extension, built as a super fast alternative to traditional vision-based browser control systems.
 
 ## Why This Exists
 
@@ -114,7 +114,7 @@ browser-bridge-server
 
 Connected tab preview:
 
-![Connected tab preview](docs/images/connected-tab-preview.png)
+![Connected tab preview](docs/images/connected-tab-preview.svg)
 
 ### 4) Operator CLI usage
 

@@ -1,3 +1,9 @@
+# README Image + Positioning Copy
+
+- [x] Fix broken README image path by adding a committed image asset under `docs/images/`.
+- [x] Update README intro copy to explicitly position this project as a super fast alternative to traditional vision-based browser control systems.
+- [x] Verify README renders image from repository path and mark checklist complete.
+
 # Open Source + PyPI (pipx) Release Plan
 
 - [x] Add packaging metadata (`pyproject.toml`) with runtime/dev extras and console scripts for server + CLI.
