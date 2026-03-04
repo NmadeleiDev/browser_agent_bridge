@@ -137,31 +137,6 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
 - Request idempotency/replay guard is enforced by `request_id` dedup window.
 - Max payload limit is enforced by `BRIDGE_MAX_MESSAGE_BYTES`.
 
-## Deprecated HTTP Endpoints
-
-Old session-based HTTP endpoints are deprecated and disabled by default:
-- `POST /api/sessions`
-- `GET /api/sessions/{session_id}`
-- `POST /api/sessions/{session_id}/command`
-
-Behavior:
-- default (`BRIDGE_ENABLE_HTTP_COMPAT=0`): returns `410 Gone` with migration hint.
-- compatibility flag on: currently returns `501` stub in this build.
-
-## Migration from HTTP Session Model
-
-Old flow:
-- create session over HTTP
-- paste `session_id` + token into extension
-- send commands over HTTP per session
-
-New flow:
-- extension directly authenticates to `/ws/client` with `instance_id` + `client_id` + token/JWT
-- operator authenticates to `/ws/operator`
-- commands routed over WS by `(instance_id, client_id)`
-
-No session creation API is required.
-
 ## Testing
 
 ```bash
@@ -170,6 +145,29 @@ pytest -v
 
 Coverage includes WS auth success/failure, command routing, disconnect handling, wrong target routing, CLI failure paths, and reconnect replacement behavior.
 
+## Contributing
+
+Contributions are very welcome.
+
+If you want to help, great places to start are:
+- bug fixes and reliability improvements
+- new command handlers and protocol hardening
+- better docs and examples
+- tests for real-world edge cases
+
+Quick contributor workflow:
+1. Fork the repo and create a focused branch.
+2. Run tests locally (`pytest -v`).
+3. Open a PR with a clear description, motivation, and test notes.
+
+For detailed guidelines, see [CONTRIBUTING.md](/Users/grigorijpotemkin/pets/browser_agent_bridge/CONTRIBUTING.md).
+
+If you have ideas but no patch yet, opening an issue/discussion is also appreciated.
+
 ## License
 
 MIT (see `LICENSE`).
+
+---
+
+Created by the creator of [openclaw-setup.me](https://openclaw-setup.me/).
