@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build>=1.2.2",
+  "httpx>=0.28.1",
   "pytest>=8.4.2",
   "twine>=5.1.1",
 ]
