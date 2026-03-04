@@ -1,3 +1,9 @@
+(() => {
+if (window.__BROWSER_BRIDGE_CONTENT_LOADED__) {
+  return;
+}
+window.__BROWSER_BRIDGE_CONTENT_LOADED__ = true;
+
 const INTERACTIVE_SELECTORS = [
   "a[href]",
   "button",
@@ -320,3 +326,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+})();

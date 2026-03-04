@@ -1,0 +1,192 @@
+---
+name: browser-bridge-cli
+description: Use this skill when an agent needs to control a user's browser through the Browser Bridge Python CLI from https://github.com/NmadeleiDev/browser_agent_bridge, including setup, server startup, extension connection, and command execution.
+---
+
+# Browser Bridge CLI
+
+## When to use
+
+Use this skill when you need to control a real Chrome tab through a user-side extension and a Python CLI bridge. Typical situations:
+- browser automation with live user browser context
+- page observation (interactive elements and DOM snapshots)
+- remote tab actions (navigate, click, type, scroll)
+- troubleshooting connection state between agent and browser
+
+Project:
+- https://github.com/NmadeleiDev/browser_agent_bridge
+
+## What this gives you
+
+This workflow has three connected parts:
+- Browser extension in Chrome receives tab commands.
+- Bridge server routes messages between browser and operator.
+- Operator CLI sends commands and reads results.
+
+CLI commands used:
+- `browser-bridge-server` to run the server
+- `browser-bridge` to run operator actions
+
+## Prerequisites
+
+- Python 3.10+
+- Chrome browser
+- Terminal access
+- Ability to load an unpacked Chrome extension
+
+## Install the CLI
+
+```bash
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install browser-agent-bridge
+```
+
+Upgrade later:
+
+```bash
+pipx upgrade browser-agent-bridge
+```
+
+## Start the bridge server
+
+Use static auth for straightforward local setup:
+
+```bash
+export BRIDGE_AUTH_MODE=static
+export BRIDGE_SHARED_TOKEN='change-me-strong-token'
+export BRIDGE_OPERATOR_TOKEN='Str0ng!Operator#42'
+browser-bridge-server
+```
+
+Default endpoints:
+- Extension client WS: `ws://127.0.0.1:8765/ws/client`
+- Operator CLI WS: `ws://127.0.0.1:8765/ws/operator`
+
+## Connect the Chrome extension (human-in-the-loop)
+
+1. Open `chrome://extensions`.
+2. Enable `Developer mode`.
+3. Click `Load unpacked`.
+4. Select the repo's `extension/` folder from https://github.com/NmadeleiDev/browser_agent_bridge.
+5. Open the Browser Bridge extension popup.
+6. Fill fields:
+- `Bridge Server WS URL`: `ws://127.0.0.1:8765/ws/client`
+- `Instance ID`: `local-instance`
+- `Client ID`: `chrome-main`
+- `Auth Token / JWT`: `change-me-strong-token`
+7. Click `Save`, then `Connect`.
+8. Confirm popup status is connected.
+
+## Operator CLI usage
+
+All examples use:
+- `instance_id=local-instance`
+- `client_id=chrome-main`
+- operator token `Str0ng!Operator#42`
+- operator websocket `ws://127.0.0.1:8765/ws/operator`
+
+List connected browser clients:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' list-clients
+```
+
+Check whether the specific client is connected:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  connect-status --instance-id local-instance --client-id chrome-main
+```
+
+Check whether tab command channel is ready:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  ping-tab --instance-id local-instance --client-id chrome-main
+```
+
+Observe interactive nodes on current page:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  observe --instance-id local-instance --client-id chrome-main --max-nodes 150
+```
+
+Get page HTML snapshot:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type get_html --payload '{"max_chars":40000}'
+```
+
+Navigate with adaptive load wait:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type navigate --payload '{"url":"https://example.com","wait_for_load":true,"wait_for_load_ms":7000}'
+```
+
+Click without load wait:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type click --payload '{"selector":"a[href]","wait_for_load":false}'
+```
+
+Type into an element:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type type --payload '{"selector":"input[name=q]","text":"browser bridge"}'
+```
+
+## Recommended execution flow for agents
+
+1. Ensure server process is running.
+2. Ensure extension popup is connected with matching `instance_id`, `client_id`, and token.
+3. Run `list-clients`.
+4. Run `connect-status`.
+5. Run `ping-tab`.
+6. Run `observe` before action commands.
+7. Run `send-command` actions (`navigate`, `click`, `type`, `scroll`, `get_html`).
+8. Re-run `observe` to confirm page state after actions.
+
+## Troubleshooting
+
+- `Target client not connected`
+  - Verify popup shows connected.
+  - Verify `instance_id` and `client_id` exactly match CLI flags.
+  - Reconnect extension and retry.
+
+- `Operator auth failed` or auth errors
+  - Verify `--token` matches `BRIDGE_OPERATOR_TOKEN`.
+
+- `Command timed out`
+  - Increase `--timeout-s`.
+  - For action commands, disable or reduce load wait in payload.
+  - Confirm active tab is a normal webpage (not restricted pages like `chrome://*`).
+
+- `Receiving end does not exist`
+  - Retry once; extension can reinject content script when needed.
+
+- Slow responses on action commands
+  - Use `wait_for_load=false` for immediate response.
+  - Or set smaller `wait_for_load_ms`.
+
+## Security notes
+
+- Treat tokens as secrets.
+- For non-local deployments, use TLS (`wss://`) and strong secrets.
+
+## Done criteria
+
+1. `list-clients` returns expected client.
+2. `connect-status` is connected.
+3. `ping-tab` reports ready.
+4. `observe` returns page data.
+5. `send-command` actions return valid results.

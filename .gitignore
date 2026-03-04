@@ -4,6 +4,10 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Local extension packaging artifacts
+extension.crx
+extension.pem
+
 # Virtual environments
 .venv/
 venv/

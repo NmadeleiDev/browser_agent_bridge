@@ -72,3 +72,19 @@
 - [x] Route all command execution to locked tab when set (instead of active focused tab).
 - [x] Add popup controls to lock current tab and unlock back to active-tab targeting.
 - [x] Validate with JS syntax checks and Python test suite.
+
+# Adaptive Post-Command Page-Load Wait
+
+- [x] Add adaptive tab-load waiter in extension background with max wait cap (default 10s).
+- [x] Apply adaptive waiting to commands that can trigger navigation (`navigate`, `click`, `type`), but return fast when tab is already complete.
+- [x] Include wait diagnostics in command response (waited ms, completed vs timed out, final tab status).
+- [x] Update README command docs to describe adaptive wait behavior and payload override.
+- [x] Run test suite and mark checklist complete.
+
+# Browser Bridge CLI Skill
+
+- [x] Create `skills/` directory with a Browser Bridge CLI skill.
+- [x] Document environment setup and dependency installation for local repo usage.
+- [x] Document server spin-up flow (auth env vars + startup command).
+- [x] Document extension connection steps and required popup values.
+- [x] Document CLI command usage (status/list/observe/ping/send-command with examples).

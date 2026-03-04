@@ -1,4 +1,4 @@
-# browser-agent-bridge
+# Browser-Agent Bridge - Ultra-Fast Browser Control for Agents
 
 WebSocket-only browser bridge for remotely controlling a local Chrome extension, built as a super fast alternative to traditional vision-based browser control systems.
 
@@ -131,6 +131,22 @@ Raw command:
 browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
   send-command --instance-id local-instance --client-id chrome-main \
   --type get_html --payload '{"max_chars":40000}'
+```
+
+Adaptive load wait (`navigate`, `click`, `type`):
+
+- Extension now waits for tab load completion before replying, but only up to 10s (adaptive: returns immediately if tab is already `complete`).
+- Override per command payload:
+  - `wait_for_load` (default `true`)
+  - `wait_for_load_ms` (default `10000`, capped at `10000`)
+- Command result includes `load_wait` diagnostics: `waited_ms`, `completed`, `timed_out`, `final_status`, `enabled`, `max_wait_ms`.
+
+Example:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type navigate --payload '{"url":"https://example.com","wait_for_load_ms":4000}'
 ```
 
 ## Security Hardening

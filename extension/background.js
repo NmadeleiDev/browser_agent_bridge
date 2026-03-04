@@ -11,6 +11,9 @@ const DEFAULTS = {
 
 const KEEPALIVE_ALARM = "bridge-keepalive";
 const KEEPALIVE_MINUTES = 1;
+const DEFAULT_POST_COMMAND_WAIT_MS = 10000;
+const MAX_POST_COMMAND_WAIT_MS = 10000;
+const LOAD_STATUS_POLL_MS = 150;
 
 let ws = null;
 let wsConnected = false;
@@ -137,8 +140,72 @@ async function injectContentScript(tabId) {
   });
 }
 
-async function sendToContent(type, payload) {
-  const tabId = await targetTabId();
+function parseLoadWaitConfig(payload) {
+  const waitFlag = payload?.wait_for_load;
+  const requested = Number(payload?.wait_for_load_ms ?? DEFAULT_POST_COMMAND_WAIT_MS);
+  const boundedWaitMs = Number.isFinite(requested)
+    ? Math.max(0, Math.min(Math.round(requested), MAX_POST_COMMAND_WAIT_MS))
+    : DEFAULT_POST_COMMAND_WAIT_MS;
+
+  return {
+    enabled: waitFlag !== false && boundedWaitMs > 0,
+    maxWaitMs: boundedWaitMs
+  };
+}
+
+async function waitForTabComplete(tabId, maxWaitMs) {
+  const startedAt = Date.now();
+  let lastStatus = "unknown";
+
+  while (true) {
+    const tab = await chrome.tabs.get(tabId);
+    lastStatus = String(tab?.status || "unknown");
+    const elapsedMs = Date.now() - startedAt;
+
+    if (lastStatus === "complete") {
+      return {
+        waited_ms: elapsedMs,
+        completed: true,
+        timed_out: false,
+        final_status: lastStatus
+      };
+    }
+    if (elapsedMs >= maxWaitMs) {
+      return {
+        waited_ms: elapsedMs,
+        completed: false,
+        timed_out: true,
+        final_status: lastStatus
+      };
+    }
+    await waitMs(Math.min(LOAD_STATUS_POLL_MS, maxWaitMs - elapsedMs));
+  }
+}
+
+async function maybeWaitForLoad(tabId, payload) {
+  const config = parseLoadWaitConfig(payload);
+  if (!config.enabled) {
+    const tab = await chrome.tabs.get(tabId);
+    return {
+      waited_ms: 0,
+      completed: String(tab?.status || "unknown") === "complete",
+      timed_out: false,
+      final_status: String(tab?.status || "unknown"),
+      enabled: false,
+      max_wait_ms: config.maxWaitMs
+    };
+  }
+
+  const waited = await waitForTabComplete(tabId, config.maxWaitMs);
+  return {
+    ...waited,
+    enabled: true,
+    max_wait_ms: config.maxWaitMs
+  };
+}
+
+async function sendToContent(type, payload, tabIdOverride = null) {
+  const tabId = typeof tabIdOverride === "number" ? tabIdOverride : await targetTabId();
   let response;
   try {
     response = await chrome.tabs.sendMessage(tabId, { type, payload });
@@ -164,11 +231,18 @@ async function executeCommand(command) {
 
   switch (type) {
     case "observe":
-    case "click":
-    case "type":
     case "scroll":
     case "get_html":
       return sendToContent(type, payload);
+    case "click":
+    case "type": {
+      const tabId = await targetTabId();
+      const result = await sendToContent(type, payload, tabId);
+      return {
+        ...result,
+        load_wait: await maybeWaitForLoad(tabId, payload)
+      };
+    }
     case "ping_tab":
       return sendToContent("ping", payload);
     case "navigate": {
@@ -178,7 +252,11 @@ async function executeCommand(command) {
         throw new Error("payload.url is required");
       }
       await chrome.tabs.update(tabId, { url });
-      return { navigated: true, url };
+      return {
+        navigated: true,
+        url,
+        load_wait: await maybeWaitForLoad(tabId, payload)
+      };
     }
     case "screenshot": {
       const tabId = await targetTabId();
