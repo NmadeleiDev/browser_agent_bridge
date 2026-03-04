@@ -2,6 +2,16 @@
 
 WebSocket-only browser bridge for remotely controlling a local Chrome extension.
 
+## Why This Exists
+
+Traditional browser relays often rely on LLM vision to understand web pages at each step. In practice, that approach is:
+
+1. Expensive: it consumes many tokens to repeatedly analyze visual page state.
+2. Slow: repeated visual analysis adds latency at every interaction step.
+3. Error-prone: visual perception includes noise that is less relevant than structured HTML for deterministic control.
+
+This project exists as an HTML-first relay: the browser-side extension exposes structured observations and preprocessed HTML, so remote agents can interact with websites with lower cost, lower latency, and more reliable control.
+
 ## Architecture (WS-only)
 
 ```text
