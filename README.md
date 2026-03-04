@@ -1,6 +1,6 @@
 # Browser-Agent Bridge - Ultra-Fast Browser Control for Agents
 
-WebSocket-only browser bridge for remotely controlling a local Chrome extension, built as a super fast alternative to traditional vision-based browser control systems.
+WebSocket-only HTML-first browser bridge for remotely controlling a local Chrome extension, built as a super fast alternative to traditional vision-based browser control systems.
 
 ## Why This Exists
 
