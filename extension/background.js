@@ -4,7 +4,9 @@ const DEFAULTS = {
   clientId: "",
   authToken: "",
   desiredConnected: false,
-  lastEvent: "idle"
+  lastEvent: "idle",
+  lockedTabId: null,
+  lockedWindowId: null
 };
 
 const KEEPALIVE_ALARM = "bridge-keepalive";
@@ -17,6 +19,8 @@ let shouldReconnect = false;
 let desiredConnected = false;
 let lastEvent = "idle";
 let activeConfig = null;
+let lockedTabId = null;
+let lockedWindowId = null;
 
 async function loadConfig() {
   const stored = await chrome.storage.local.get(DEFAULTS);
@@ -37,7 +41,8 @@ function emitStatus() {
     kind: "status",
     status: {
       connected: wsConnected,
-      lastEvent
+      lastEvent,
+      lock: lockState()
     }
   }).catch(() => {});
 }
@@ -45,7 +50,9 @@ function emitStatus() {
 async function persistRuntimeState() {
   await chrome.storage.local.set({
     desiredConnected,
-    lastEvent
+    lastEvent,
+    lockedTabId,
+    lockedWindowId
   });
 }
 
@@ -65,6 +72,55 @@ async function activeTabId() {
   return tab.id;
 }
 
+async function activeTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab || typeof tab.id !== "number" || typeof tab.windowId !== "number") {
+    throw new Error("No active tab available");
+  }
+  return tab;
+}
+
+function lockState() {
+  return {
+    enabled: typeof lockedTabId === "number",
+    tabId: lockedTabId,
+    windowId: lockedWindowId
+  };
+}
+
+async function lockCurrentTab() {
+  const tab = await activeTab();
+  lockedTabId = tab.id;
+  lockedWindowId = tab.windowId;
+  await persistRuntimeState();
+  return lockState();
+}
+
+async function unlockTab() {
+  lockedTabId = null;
+  lockedWindowId = null;
+  await persistRuntimeState();
+  return lockState();
+}
+
+async function targetTabId() {
+  if (typeof lockedTabId !== "number") {
+    return activeTabId();
+  }
+  try {
+    const tab = await chrome.tabs.get(lockedTabId);
+    if (typeof lockedWindowId === "number" && tab.windowId !== lockedWindowId) {
+      throw new Error("Locked tab window changed");
+    }
+    return tab.id;
+  } catch {
+    await unlockTab();
+    updateStatus("lock-lost", wsConnected);
+    throw new Error("Locked tab is no longer available. Re-lock a tab in the extension popup.");
+  }
+}
+
 function isReceiverMissingError(err) {
   const message = String(err?.message || err || "");
   return message.includes("Receiving end does not exist");
@@ -82,7 +138,7 @@ async function injectContentScript(tabId) {
 }
 
 async function sendToContent(type, payload) {
-  const tabId = await activeTabId();
+  const tabId = await targetTabId();
   let response;
   try {
     response = await chrome.tabs.sendMessage(tabId, { type, payload });
@@ -116,7 +172,7 @@ async function executeCommand(command) {
     case "ping_tab":
       return sendToContent("ping", payload);
     case "navigate": {
-      const tabId = await activeTabId();
+      const tabId = await targetTabId();
       const url = String(payload.url || "");
       if (!url) {
         throw new Error("payload.url is required");
@@ -125,7 +181,12 @@ async function executeCommand(command) {
       return { navigated: true, url };
     }
     case "screenshot": {
-      const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: "png" });
+      const tabId = await targetTabId();
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab.active) {
+        throw new Error("Locked tab is not visible. Activate that tab before screenshot.");
+      }
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       const maxChars = Number(payload.max_chars || 500000);
       return {
         format: "png-data-url",
@@ -282,6 +343,8 @@ async function restoreRuntimeState() {
   const stored = await chrome.storage.local.get(DEFAULTS);
   desiredConnected = Boolean(stored.desiredConnected);
   lastEvent = String(stored.lastEvent || "idle");
+  lockedTabId = typeof stored.lockedTabId === "number" ? stored.lockedTabId : null;
+  lockedWindowId = typeof stored.lockedWindowId === "number" ? stored.lockedWindowId : null;
   activeConfig = {
     wsUrl: String(stored.wsUrl || ""),
     instanceId: String(stored.instanceId || ""),
@@ -322,7 +385,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           ok: true,
           config,
           connected: wsConnected,
-          lastEvent
+          lastEvent,
+          lock: lockState()
         };
       }
       case "connect": {
@@ -340,7 +404,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await disconnectWs();
         return { ok: true, connected: false, lastEvent };
       case "status":
-        return { ok: true, connected: wsConnected, lastEvent };
+        return { ok: true, connected: wsConnected, lastEvent, lock: lockState() };
+      case "lock-current-tab":
+        return { ok: true, lock: await lockCurrentTab() };
+      case "unlock-tab":
+        return { ok: true, lock: await unlockTab() };
       default:
         return { ok: false, error: "Unknown message kind" };
     }
@@ -361,6 +429,14 @@ chrome.runtime.onInstalled.addListener(async () => {
     lastEvent
   });
   await ensureKeepaliveAlarm();
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId !== lockedTabId) {
+    return;
+  }
+  unlockTab().catch(() => {});
+  updateStatus("lock-lost", wsConnected);
 });
 
 chrome.runtime.onStartup.addListener(() => {

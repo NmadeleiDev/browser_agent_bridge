@@ -59,3 +59,10 @@
 - [x] Persist extension runtime connection state/intention and restore it after worker restart.
 - [x] Add periodic wake/reconnect mechanism (`chrome.alarms`) so bridge stays connected without popup open.
 - [x] Validate extension behavior + run Python tests to ensure no backend regressions.
+
+# Extension Tab Locking
+
+- [x] Add persistent locked-tab state (`tabId/windowId`) in extension background runtime.
+- [x] Route all command execution to locked tab when set (instead of active focused tab).
+- [x] Add popup controls to lock current tab and unlock back to active-tab targeting.
+- [x] Validate with JS syntax checks and Python test suite.
