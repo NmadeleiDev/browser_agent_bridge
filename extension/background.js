@@ -2,13 +2,19 @@ const DEFAULTS = {
   wsUrl: "",
   instanceId: "",
   clientId: "",
-  authToken: ""
+  authToken: "",
+  desiredConnected: false,
+  lastEvent: "idle"
 };
+
+const KEEPALIVE_ALARM = "bridge-keepalive";
+const KEEPALIVE_MINUTES = 1;
 
 let ws = null;
 let wsConnected = false;
 let reconnectTimer = null;
 let shouldReconnect = false;
+let desiredConnected = false;
 let lastEvent = "idle";
 let activeConfig = null;
 
@@ -34,6 +40,20 @@ function emitStatus() {
       lastEvent
     }
   }).catch(() => {});
+}
+
+async function persistRuntimeState() {
+  await chrome.storage.local.set({
+    desiredConnected,
+    lastEvent
+  });
+}
+
+function updateStatus(event, connected = wsConnected) {
+  wsConnected = connected;
+  lastEvent = event;
+  emitStatus();
+  persistRuntimeState().catch(() => {});
 }
 
 async function activeTabId() {
@@ -70,8 +90,7 @@ async function sendToContent(type, payload) {
     if (!isReceiverMissingError(err)) {
       throw err;
     }
-    lastEvent = "tab-recovering";
-    emitStatus();
+    updateStatus("tab-recovering");
     await injectContentScript(tabId);
     await waitMs(80);
     response = await chrome.tabs.sendMessage(tabId, { type, payload });
@@ -79,8 +98,7 @@ async function sendToContent(type, payload) {
   if (!response?.ok) {
     throw new Error(response?.error || "Content script command failed");
   }
-  lastEvent = "tab-ready";
-  emitStatus();
+  updateStatus("tab-ready");
   return response.result || {};
 }
 
@@ -120,8 +138,7 @@ async function executeCommand(command) {
   }
 }
 
-function stopWs() {
-  shouldReconnect = false;
+function closeSocket() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -130,13 +147,18 @@ function stopWs() {
     ws.close();
     ws = null;
   }
-  wsConnected = false;
-  lastEvent = "disconnected";
-  emitStatus();
+}
+
+async function disconnectWs() {
+  shouldReconnect = false;
+  desiredConnected = false;
+  closeSocket();
+  updateStatus("disconnected", false);
+  await persistRuntimeState();
 }
 
 function scheduleReconnect() {
-  if (!shouldReconnect || reconnectTimer) {
+  if (!shouldReconnect || !desiredConnected || reconnectTimer) {
     return;
   }
   reconnectTimer = setTimeout(async () => {
@@ -168,16 +190,16 @@ async function connectWs(configOverride = null) {
   const config = configOverride || await loadConfig();
   validateConfig(config);
 
-  stopWs();
+  closeSocket();
   shouldReconnect = true;
+  desiredConnected = true;
   activeConfig = config;
+  await persistRuntimeState();
 
   ws = new WebSocket(config.wsUrl.trim());
 
   ws.onopen = () => {
-    wsConnected = false;
-    lastEvent = "authenticating";
-    emitStatus();
+    updateStatus("authenticating", false);
     ws.send(JSON.stringify({
       kind: "auth",
       instance_id: config.instanceId,
@@ -187,15 +209,12 @@ async function connectWs(configOverride = null) {
   };
 
   ws.onclose = () => {
-    wsConnected = false;
-    lastEvent = "socket-closed";
-    emitStatus();
+    updateStatus("socket-closed", false);
     scheduleReconnect();
   };
 
   ws.onerror = () => {
-    lastEvent = "socket-error";
-    emitStatus();
+    updateStatus("socket-error");
   };
 
   ws.onmessage = async (evt) => {
@@ -204,17 +223,15 @@ async function connectWs(configOverride = null) {
       const kind = parsed.kind;
 
       if (kind === "auth_ok") {
-        wsConnected = true;
-        lastEvent = "connected";
-        emitStatus();
+        updateStatus("connected", true);
         return;
       }
 
       if (kind === "auth_error") {
-        wsConnected = false;
+        desiredConnected = false;
         shouldReconnect = false;
-        lastEvent = `auth-error:${parsed.code || "AUTH_FAILED"}`;
-        emitStatus();
+        updateStatus(`auth-error:${parsed.code || "AUTH_FAILED"}`, false);
+        persistRuntimeState().catch(() => {});
         ws.close();
         return;
       }
@@ -254,6 +271,40 @@ async function connectWs(configOverride = null) {
   };
 }
 
+async function ensureKeepaliveAlarm() {
+  const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
+  if (!existing) {
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_MINUTES });
+  }
+}
+
+async function restoreRuntimeState() {
+  const stored = await chrome.storage.local.get(DEFAULTS);
+  desiredConnected = Boolean(stored.desiredConnected);
+  lastEvent = String(stored.lastEvent || "idle");
+  activeConfig = {
+    wsUrl: String(stored.wsUrl || ""),
+    instanceId: String(stored.instanceId || ""),
+    clientId: String(stored.clientId || ""),
+    authToken: String(stored.authToken || "")
+  };
+}
+
+async function bootstrap() {
+  await ensureKeepaliveAlarm();
+  await restoreRuntimeState();
+  if (desiredConnected) {
+    try {
+      await connectWs(activeConfig);
+    } catch {
+      updateStatus("reconnect-waiting", false);
+      scheduleReconnect();
+    }
+  } else {
+    emitStatus();
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const run = async () => {
     switch (message?.kind) {
@@ -286,7 +337,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return { ok: true, connected: wsConnected, lastEvent };
       }
       case "disconnect":
-        stopWs();
+        await disconnectWs();
         return { ok: true, connected: false, lastEvent };
       case "status":
         return { ok: true, connected: wsConnected, lastEvent };
@@ -304,5 +355,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await loadConfig();
-  await saveConfig(current);
+  await saveConfig({
+    ...current,
+    desiredConnected,
+    lastEvent
+  });
+  await ensureKeepaliveAlarm();
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  bootstrap().catch(() => {});
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== KEEPALIVE_ALARM) {
+    return;
+  }
+  if (!desiredConnected || wsConnected) {
+    return;
+  }
+  connectWs(activeConfig).catch(() => {
+    updateStatus("reconnect-waiting", false);
+    scheduleReconnect();
+  });
+});
+
+bootstrap().catch(() => {});

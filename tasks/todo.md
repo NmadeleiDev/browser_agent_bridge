@@ -52,3 +52,10 @@
 - [x] Add tests for weak/strong operator token validation behavior.
 - [x] Update README security notes for operator token complexity requirements.
 - [x] Run tests and mark checklist complete.
+
+# Extension Background Persistence
+
+- [x] Confirm root cause of popup closing -> `Status: idle` regression in MV3 service worker lifecycle.
+- [x] Persist extension runtime connection state/intention and restore it after worker restart.
+- [x] Add periodic wake/reconnect mechanism (`chrome.alarms`) so bridge stays connected without popup open.
+- [x] Validate extension behavior + run Python tests to ensure no backend regressions.
