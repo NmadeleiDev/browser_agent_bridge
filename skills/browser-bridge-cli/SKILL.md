@@ -79,7 +79,7 @@ Default endpoints:
 - Extension client WS: `ws://127.0.0.1:8765/ws/client`
 - Operator CLI WS: `ws://127.0.0.1:8765/ws/operator`
 
-## Connect the Chrome extension (human-in-the-loop)
+## Connect the Chrome extension (tell your human to do this)
 
 1. Open `chrome://extensions`.
 2. Enable `Developer mode`.
