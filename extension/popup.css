@@ -1,0 +1,82 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  width: 380px;
+  background: #f7f8fb;
+  color: #1c2433;
+}
+
+main {
+  padding: 12px;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+input {
+  width: 100%;
+  margin-top: 4px;
+  border: 1px solid #cfd5e3;
+  border-radius: 8px;
+  height: 30px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  font-size: 12px;
+}
+
+details {
+  margin-bottom: 10px;
+}
+
+summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #3f4a62;
+  margin-bottom: 8px;
+}
+
+.derived {
+  margin-top: 0;
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: #5d6883;
+  word-break: break-all;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+button {
+  flex: 1;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #2f6fff;
+  color: white;
+}
+
+button#disconnectBtn {
+  background: #5f6b85;
+}
+
+.status {
+  margin-top: 10px;
+  font-size: 12px;
+}

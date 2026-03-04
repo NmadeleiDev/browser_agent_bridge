@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Browser Bridge</h1>
+
+      <label>
+        Bridge Server Base URL
+        <input id="serverBaseUrl" placeholder="https://<instance-host>" />
+      </label>
+
+      <label>
+        Session ID
+        <input id="sessionId" placeholder="Session ID" />
+      </label>
+
+      <label>
+        Extension Token
+        <input id="extensionToken" placeholder="Extension token" />
+      </label>
+
+      <details>
+        <summary>Advanced (explicit WebSocket URL override)</summary>
+        <label>
+          WebSocket URL
+          <input id="wsUrl" placeholder="wss://<instance-host>/ws/extension/<session>?token=<token>" />
+        </label>
+      </details>
+
+      <p id="effectiveWs" class="derived">Effective WS: -</p>
+
+      <div class="buttons">
+        <button id="saveBtn">Save</button>
+        <button id="connectBtn">Connect</button>
+        <button id="disconnectBtn">Disconnect</button>
+      </div>
+
+      <p id="status" class="status">Status: idle</p>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
