@@ -1,8 +1,8 @@
 const DEFAULTS = {
-  serverBaseUrl: "",
   wsUrl: "",
-  sessionId: "",
-  extensionToken: ""
+  instanceId: "",
+  clientId: "",
+  authToken: ""
 };
 
 let ws = null;
@@ -10,60 +10,20 @@ let wsConnected = false;
 let reconnectTimer = null;
 let shouldReconnect = false;
 let lastEvent = "idle";
+let activeConfig = null;
 
 async function loadConfig() {
   const stored = await chrome.storage.local.get(DEFAULTS);
   return {
-    serverBaseUrl: String(stored.serverBaseUrl || ""),
     wsUrl: String(stored.wsUrl || ""),
-    sessionId: String(stored.sessionId || ""),
-    extensionToken: String(stored.extensionToken || "")
+    instanceId: String(stored.instanceId || ""),
+    clientId: String(stored.clientId || ""),
+    authToken: String(stored.authToken || "")
   };
 }
 
 async function saveConfig(config) {
   await chrome.storage.local.set(config);
-}
-
-function trimSlash(value) {
-  return String(value || "").replace(/\/+$/, "");
-}
-
-function toWsScheme(base) {
-  if (base.startsWith("wss://") || base.startsWith("ws://")) {
-    return base;
-  }
-  if (base.startsWith("https://")) {
-    return `wss://${base.slice("https://".length)}`;
-  }
-  if (base.startsWith("http://")) {
-    return `ws://${base.slice("http://".length)}`;
-  }
-  throw new Error("serverBaseUrl must start with https://, http://, wss://, or ws://");
-}
-
-function deriveWsUrl(config) {
-  const explicit = trimSlash(config.wsUrl);
-  if (explicit) {
-    return explicit;
-  }
-
-  const base = trimSlash(config.serverBaseUrl);
-  const sessionId = String(config.sessionId || "").trim();
-  const token = String(config.extensionToken || "").trim();
-
-  if (!base) {
-    throw new Error("Configure serverBaseUrl or wsUrl");
-  }
-  if (!sessionId) {
-    throw new Error("sessionId is required");
-  }
-  if (!token) {
-    throw new Error("extensionToken is required");
-  }
-
-  const wsBase = toWsScheme(base);
-  return `${wsBase}/ws/extension/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
 }
 
 function emitStatus() {
@@ -85,12 +45,42 @@ async function activeTabId() {
   return tab.id;
 }
 
+function isReceiverMissingError(err) {
+  const message = String(err?.message || err || "");
+  return message.includes("Receiving end does not exist");
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function injectContentScript(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content.js"]
+  });
+}
+
 async function sendToContent(type, payload) {
   const tabId = await activeTabId();
-  const response = await chrome.tabs.sendMessage(tabId, { type, payload });
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tabId, { type, payload });
+  } catch (err) {
+    if (!isReceiverMissingError(err)) {
+      throw err;
+    }
+    lastEvent = "tab-recovering";
+    emitStatus();
+    await injectContentScript(tabId);
+    await waitMs(80);
+    response = await chrome.tabs.sendMessage(tabId, { type, payload });
+  }
   if (!response?.ok) {
     throw new Error(response?.error || "Content script command failed");
   }
+  lastEvent = "tab-ready";
+  emitStatus();
   return response.result || {};
 }
 
@@ -105,6 +95,8 @@ async function executeCommand(command) {
     case "scroll":
     case "get_html":
       return sendToContent(type, payload);
+    case "ping_tab":
+      return sendToContent("ping", payload);
     case "navigate": {
       const tabId = await activeTabId();
       const url = String(payload.url || "");
@@ -150,26 +142,48 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
     try {
-      await connectWs();
+      await connectWs(activeConfig);
     } catch {
       scheduleReconnect();
     }
   }, 2000);
 }
 
+function validateConfig(config) {
+  if (!config.wsUrl.trim()) {
+    throw new Error("wsUrl is required");
+  }
+  if (!config.instanceId.trim()) {
+    throw new Error("instanceId is required");
+  }
+  if (!config.clientId.trim()) {
+    throw new Error("clientId is required");
+  }
+  if (!config.authToken.trim()) {
+    throw new Error("authToken is required");
+  }
+}
+
 async function connectWs(configOverride = null) {
   const config = configOverride || await loadConfig();
-  const wsUrl = deriveWsUrl(config);
+  validateConfig(config);
 
   stopWs();
   shouldReconnect = true;
+  activeConfig = config;
 
-  ws = new WebSocket(wsUrl);
+  ws = new WebSocket(config.wsUrl.trim());
 
   ws.onopen = () => {
-    wsConnected = true;
-    lastEvent = "connected";
+    wsConnected = false;
+    lastEvent = "authenticating";
     emitStatus();
+    ws.send(JSON.stringify({
+      kind: "auth",
+      instance_id: config.instanceId,
+      client_id: config.clientId,
+      token: config.authToken
+    }));
   };
 
   ws.onclose = () => {
@@ -187,12 +201,32 @@ async function connectWs(configOverride = null) {
   ws.onmessage = async (evt) => {
     try {
       const parsed = JSON.parse(evt.data);
-      if (parsed.kind === "pong") {
+      const kind = parsed.kind;
+
+      if (kind === "auth_ok") {
+        wsConnected = true;
+        lastEvent = "connected";
+        emitStatus();
         return;
       }
-      if (parsed.kind !== "command") {
+
+      if (kind === "auth_error") {
+        wsConnected = false;
+        shouldReconnect = false;
+        lastEvent = `auth-error:${parsed.code || "AUTH_FAILED"}`;
+        emitStatus();
+        ws.close();
         return;
       }
+
+      if (kind === "pong") {
+        return;
+      }
+
+      if (kind !== "command") {
+        return;
+      }
+
       const commandId = parsed.command_id;
       if (!commandId) {
         return;
@@ -225,47 +259,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message?.kind) {
       case "save-config":
         await saveConfig({
-          serverBaseUrl: String(message.serverBaseUrl || ""),
           wsUrl: String(message.wsUrl || ""),
-          sessionId: String(message.sessionId || ""),
-          extensionToken: String(message.extensionToken || "")
+          instanceId: String(message.instanceId || ""),
+          clientId: String(message.clientId || ""),
+          authToken: String(message.authToken || "")
         });
         return { ok: true };
       case "load-config": {
         const config = await loadConfig();
-        let effectiveWsUrl = "";
-        try {
-          effectiveWsUrl = deriveWsUrl(config);
-        } catch {
-          effectiveWsUrl = "";
-        }
         return {
           ok: true,
           config,
-          effectiveWsUrl,
           connected: wsConnected,
           lastEvent
         };
       }
-      case "connect":
-        if (
-          typeof message.serverBaseUrl === "string" ||
-          typeof message.wsUrl === "string" ||
-          typeof message.sessionId === "string" ||
-          typeof message.extensionToken === "string"
-        ) {
-          const cfg = {
-            serverBaseUrl: String(message.serverBaseUrl || ""),
-            wsUrl: String(message.wsUrl || ""),
-            sessionId: String(message.sessionId || ""),
-            extensionToken: String(message.extensionToken || "")
-          };
-          await saveConfig(cfg);
-          await connectWs(cfg);
-          return { ok: true, connected: wsConnected, lastEvent };
-        }
-        await connectWs();
+      case "connect": {
+        const cfg = {
+          wsUrl: String(message.wsUrl || ""),
+          instanceId: String(message.instanceId || ""),
+          clientId: String(message.clientId || ""),
+          authToken: String(message.authToken || "")
+        };
+        await saveConfig(cfg);
+        await connectWs(cfg);
         return { ok: true, connected: wsConnected, lastEvent };
+      }
       case "disconnect":
         stopWs();
         return { ok: true, connected: false, lastEvent };

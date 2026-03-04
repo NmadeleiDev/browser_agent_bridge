@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import secrets
 from typing import Any
 
 from fastapi import WebSocket
@@ -13,52 +14,82 @@ def utc_now_iso() -> str:
 
 
 @dataclass
-class SessionState:
-    session_id: str
-    created_at: str = field(default_factory=utc_now_iso)
-    extension_connected_at: str | None = None
-    last_seen_at: str | None = None
-    extension_ws: WebSocket | None = None
+class ClientConnection:
+    instance_id: str
+    client_id: str
+    websocket: WebSocket
+    connected_at: str = field(default_factory=utc_now_iso)
+    last_seen_at: str = field(default_factory=utc_now_iso)
     pending_results: dict[str, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
-    seen_request_ids: dict[str, float] = field(default_factory=dict)
 
 
-class InMemoryState:
+class BridgeState:
     def __init__(self) -> None:
-        self._sessions: dict[str, SessionState] = {}
+        self._clients: dict[tuple[str, str], ClientConnection] = {}
+        self._seen_request_ids: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
-    async def create_session(self) -> SessionState:
+    async def register_client(self, *, instance_id: str, client_id: str, websocket: WebSocket) -> ClientConnection:
+        key = (instance_id, client_id)
         async with self._lock:
-            session = SessionState(session_id=self._new_session_id())
-            self._sessions[session.session_id] = session
-            return session
+            existing = self._clients.get(key)
+            if existing and existing.websocket is not websocket:
+                await existing.websocket.close(code=1012, reason="Replaced by a new connection")
+                for command_id, future in list(existing.pending_results.items()):
+                    if not future.done():
+                        future.set_result(
+                            {
+                                "kind": "result",
+                                "command_id": command_id,
+                                "ok": False,
+                                "error": "Client replaced by new connection",
+                            }
+                        )
+            conn = ClientConnection(instance_id=instance_id, client_id=client_id, websocket=websocket)
+            self._clients[key] = conn
+            return conn
 
-    async def get_session(self, session_id: str) -> SessionState | None:
+    async def remove_client(self, *, instance_id: str, client_id: str, websocket: WebSocket) -> None:
         async with self._lock:
-            return self._sessions.get(session_id)
+            key = (instance_id, client_id)
+            existing = self._clients.get(key)
+            if not existing or existing.websocket is not websocket:
+                return
+            self._clients.pop(key, None)
+            for command_id, future in list(existing.pending_results.items()):
+                if not future.done():
+                    future.set_result(
+                        {
+                            "kind": "result",
+                            "command_id": command_id,
+                            "ok": False,
+                            "error": "Client disconnected",
+                        }
+                    )
 
-    async def register_request_id(self, session_id: str, request_id: str, ttl_s: float = 300.0) -> bool:
+    async def get_client(self, *, instance_id: str, client_id: str) -> ClientConnection | None:
+        async with self._lock:
+            return self._clients.get((instance_id, client_id))
+
+    async def list_clients(self) -> list[ClientConnection]:
+        async with self._lock:
+            return list(self._clients.values())
+
+    async def register_request_id(self, request_id: str, ttl_s: float = 300.0) -> bool:
         now = asyncio.get_running_loop().time()
         async with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                return False
-
-            stale = [rid for rid, ts in session.seen_request_ids.items() if now - ts > ttl_s]
+            stale = [rid for rid, ts in self._seen_request_ids.items() if now - ts > ttl_s]
             for rid in stale:
-                session.seen_request_ids.pop(rid, None)
+                self._seen_request_ids.pop(rid, None)
 
-            if request_id in session.seen_request_ids:
+            if request_id in self._seen_request_ids:
                 return False
 
-            session.seen_request_ids[request_id] = now
+            self._seen_request_ids[request_id] = now
             return True
 
-    def _new_session_id(self) -> str:
-        import secrets
-
-        return secrets.token_urlsafe(12)
+    def new_command_id(self) -> str:
+        return secrets.token_urlsafe(10)
 
 
-state = InMemoryState()
+state = BridgeState()

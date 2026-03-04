@@ -1,9 +1,8 @@
-const serverBaseUrlInput = document.getElementById("serverBaseUrl");
 const wsUrlInput = document.getElementById("wsUrl");
-const sessionIdInput = document.getElementById("sessionId");
-const extensionTokenInput = document.getElementById("extensionToken");
+const instanceIdInput = document.getElementById("instanceId");
+const clientIdInput = document.getElementById("clientId");
+const authTokenInput = document.getElementById("authToken");
 const statusEl = document.getElementById("status");
-const effectiveWsEl = document.getElementById("effectiveWs");
 
 const saveBtn = document.getElementById("saveBtn");
 const connectBtn = document.getElementById("connectBtn");
@@ -11,10 +10,6 @@ const disconnectBtn = document.getElementById("disconnectBtn");
 
 function setStatus(text) {
   statusEl.textContent = `Status: ${text}`;
-}
-
-function setEffectiveWs(url) {
-  effectiveWsEl.textContent = `Effective WS: ${url || "-"}`;
 }
 
 async function callBg(message) {
@@ -29,21 +24,20 @@ async function loadState() {
   }
 
   const config = response.config;
-  serverBaseUrlInput.value = config.serverBaseUrl || "";
   wsUrlInput.value = config.wsUrl || "";
-  sessionIdInput.value = config.sessionId || "";
-  extensionTokenInput.value = config.extensionToken || "";
-  setEffectiveWs(response.effectiveWsUrl || "");
+  instanceIdInput.value = config.instanceId || "";
+  clientIdInput.value = config.clientId || "";
+  authTokenInput.value = config.authToken || "";
   setStatus(response.connected ? `connected (${response.lastEvent})` : response.lastEvent);
 }
 
 async function saveConfig() {
   const response = await callBg({
     kind: "save-config",
-    serverBaseUrl: serverBaseUrlInput.value.trim(),
     wsUrl: wsUrlInput.value.trim(),
-    sessionId: sessionIdInput.value.trim(),
-    extensionToken: extensionTokenInput.value.trim()
+    instanceId: instanceIdInput.value.trim(),
+    clientId: clientIdInput.value.trim(),
+    authToken: authTokenInput.value.trim()
   });
   if (!response?.ok) {
     setStatus(response?.error || "save failed");
@@ -56,10 +50,10 @@ async function saveConfig() {
 async function connect() {
   const response = await callBg({
     kind: "connect",
-    serverBaseUrl: serverBaseUrlInput.value.trim(),
     wsUrl: wsUrlInput.value.trim(),
-    sessionId: sessionIdInput.value.trim(),
-    extensionToken: extensionTokenInput.value.trim()
+    instanceId: instanceIdInput.value.trim(),
+    clientId: clientIdInput.value.trim(),
+    authToken: authTokenInput.value.trim()
   });
   if (!response?.ok) {
     setStatus(response?.error || "connect failed");

@@ -7,221 +7,119 @@ import browser_bridge.cli as cli
 import pytest
 
 
-class _FakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self._payload = payload
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict[str, object]:
-        return self._payload
-
-
-def test_send_command_generates_request_id(monkeypatch, capsys) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: ANN001
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["json"] = json
-        captured["timeout"] = timeout
-        return _FakeResponse({"command_id": "c1", "ok": True, "result": {"done": True}, "error": None})
-
-    monkeypatch.setattr(cli.httpx, "post", fake_post)
-
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        session_id="sid",
-        agent_token="agt",
-        name="",
-        command_type="observe",
-        payload="{}",
-        timeout_s=2.0,
-        request_id="",
+def _base_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        server_ws_url="ws://127.0.0.1:8765/ws/operator",
+        token="tok",
     )
 
-    code = cli.send_command(args)
-    out = capsys.readouterr().out
 
-    assert code == 0
-    assert captured["url"].endswith("/api/sessions/sid/command")
-    assert captured["headers"]["Authorization"] == "Bearer agt"
-    assert captured["headers"]["X-Request-ID"]
-    assert '"request_id":' in out
+def test_send_command_invalid_payload_json() -> None:
+    args = _base_args()
+    args.instance_id = "inst"
+    args.client_id = "client"
+    args.command_type = "observe"
+    args.payload = "{bad-json"
+    args.timeout_s = 2.0
+    args.request_id = ""
 
-
-def test_send_command_uses_provided_request_id(monkeypatch, capsys) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: ANN001
-        captured["headers"] = headers
-        return _FakeResponse({"command_id": "c2", "ok": True, "result": {}, "error": None})
-
-    monkeypatch.setattr(cli.httpx, "post", fake_post)
-
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        session_id="sid",
-        agent_token="agt",
-        name="",
-        command_type="click",
-        payload='{"selector":"button"}',
-        timeout_s=3.0,
-        request_id="fixed-id-1",
-    )
-
-    code = cli.send_command(args)
-    _ = capsys.readouterr().out
-
-    assert code == 0
-    assert captured["headers"]["X-Request-ID"] == "fixed-id-1"
-
-
-def test_create_session_saves_named_profile(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("BROWSER_BRIDGE_CONFIG", str(tmp_path / "sessions.json"))
-
-    def fake_post(url, params=None, timeout=None):  # noqa: ANN001
-        return _FakeResponse(
-            {
-                "session_id": "sid-1",
-                "agent_token": "agt-1",
-                "extension_token": "ext-1",
-                "agent_token_expires_at": "2026-03-04T00:00:00+00:00",
-                "extension_token_expires_at": "2026-03-05T00:00:00+00:00",
-                "ws_url": "ws://127.0.0.1:8765/ws/extension/sid-1?token=ext-1",
-            }
-        )
-
-    monkeypatch.setattr(cli.httpx, "post", fake_post)
-
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        ws_base="ws://127.0.0.1:8765",
-        name="local",
-        make_default=True,
-    )
-    code = cli.create_session(args)
-    out = capsys.readouterr().out
-
-    assert code == 0
-    assert '"saved_as": "local"' in out
-
-    config = json.loads((tmp_path / "sessions.json").read_text(encoding="utf-8"))
-    assert config["default_session_name"] == "local"
-    assert config["sessions"]["local"]["session_id"] == "sid-1"
-    assert config["sessions"]["local"]["agent_token"] == "agt-1"
-
-
-def test_send_command_uses_named_profile(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("BROWSER_BRIDGE_CONFIG", str(tmp_path / "sessions.json"))
-    (tmp_path / "sessions.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "default_session_name": None,
-                "sessions": {
-                    "local": {
-                        "server": "http://127.0.0.1:8765",
-                        "session_id": "sid-from-config",
-                        "agent_token": "agt-from-config",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    captured: dict[str, object] = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: ANN001
-        captured["url"] = url
-        captured["headers"] = headers
-        return _FakeResponse({"command_id": "c3", "ok": True, "result": {}, "error": None})
-
-    monkeypatch.setattr(cli.httpx, "post", fake_post)
-
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        session_id="",
-        agent_token="",
-        name="local",
-        command_type="observe",
-        payload="{}",
-        timeout_s=2.0,
-        request_id="",
-    )
-
-    code = cli.send_command(args)
-    _ = capsys.readouterr().out
-
-    assert code == 0
-    assert captured["url"].endswith("/api/sessions/sid-from-config/command")
-    assert captured["headers"]["Authorization"] == "Bearer agt-from-config"
-
-
-def test_status_uses_default_named_profile(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("BROWSER_BRIDGE_CONFIG", str(tmp_path / "sessions.json"))
-    (tmp_path / "sessions.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "default_session_name": "default",
-                "sessions": {
-                    "default": {
-                        "server": "http://127.0.0.1:8765",
-                        "session_id": "sid-default",
-                        "agent_token": "agt-default",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    captured: dict[str, object] = {}
-
-    def fake_get(url, headers=None, timeout=None):  # noqa: ANN001
-        captured["url"] = url
-        captured["headers"] = headers
-        return _FakeResponse({"session_id": "sid-default", "connected": False})
-
-    monkeypatch.setattr(cli.httpx, "get", fake_get)
-
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        session_id="",
-        agent_token="",
-        name="",
-    )
-    code = cli.session_status(args)
-    _ = capsys.readouterr().out
-
-    assert code == 0
-    assert captured["url"].endswith("/api/sessions/sid-default")
-    assert captured["headers"]["Authorization"] == "Bearer agt-default"
-
-
-def test_send_command_rejects_invalid_payload_json() -> None:
-    args = argparse.Namespace(
-        server="http://127.0.0.1:8765",
-        session_id="sid",
-        agent_token="agt",
-        name="",
-        command_type="navigate",
-        payload="{bad-json",
-        timeout_s=2.0,
-        request_id="",
-    )
     with pytest.raises(cli.CliError) as exc:
         cli.send_command(args)
     assert "Invalid JSON for --payload" in exc.value.message
-    assert exc.value.hint is not None
 
 
-def test_resolve_credentials_missing_raises_actionable_error() -> None:
-    args = argparse.Namespace(session_id="", agent_token="", name="")
+def test_send_command_maps_failure(monkeypatch) -> None:
+    args = _base_args()
+    args.instance_id = "inst"
+    args.client_id = "client"
+    args.command_type = "observe"
+    args.payload = "{}"
+    args.timeout_s = 2.0
+    args.request_id = "req1"
+
+    async def fake_send_and_recv(_args, payload):  # noqa: ANN001
+        assert payload["kind"] == "send_command"
+        return {
+            "kind": "command_result",
+            "ok": False,
+            "code": "CLIENT_NOT_CONNECTED",
+            "error": "Target client not connected",
+            "request_id": "req1",
+        }
+
+    monkeypatch.setattr(cli, "_send_and_recv", fake_send_and_recv)
+
     with pytest.raises(cli.CliError) as exc:
-        cli._resolve_credentials(args)
-    assert exc.value.message == "Missing credentials"
-    assert "create-session --name" in (exc.value.hint or "")
+        cli.send_command(args)
+    assert "CLIENT_NOT_CONNECTED" in exc.value.message
+
+
+def test_ping_tab_maps_to_send_command(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_send_command(args):  # noqa: ANN001
+        captured["command_type"] = args.command_type
+        captured["payload"] = args.payload
+        return 0
+
+    monkeypatch.setattr(cli, "send_command", fake_send_command)
+
+    args = _base_args()
+    args.instance_id = "inst"
+    args.client_id = "client"
+    args.timeout_s = 8.0
+    args.request_id = ""
+
+    code = cli.ping_tab(args)
+    assert code == 0
+    assert captured["command_type"] == "ping_tab"
+    assert captured["payload"] == "{}"
+
+
+def test_observe_maps_to_send_command(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_send_command(args):  # noqa: ANN001
+        captured["command_type"] = args.command_type
+        captured["payload"] = args.payload
+        return 0
+
+    monkeypatch.setattr(cli, "send_command", fake_send_command)
+
+    args = _base_args()
+    args.instance_id = "inst"
+    args.client_id = "client"
+    args.max_nodes = 9
+    args.timeout_s = 20.0
+    args.request_id = ""
+
+    code = cli.observe(args)
+    assert code == 0
+    assert captured["command_type"] == "observe"
+    assert json.loads(str(captured["payload"])) == {"max_nodes": 9}
+
+
+def test_setup_secret_writes_file(monkeypatch, tmp_path, capsys) -> None:
+    secret_path = tmp_path / "jwt_secret"
+    monkeypatch.setenv("BRIDGE_JWT_SECRET_FILE", str(secret_path))
+    args = argparse.Namespace(secret="", force=False, show_secret=False)
+
+    code = cli.setup_secret(args)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    body = json.loads(out)
+    assert body["ok"] is True
+    assert body["secret_file"] == str(secret_path)
+    assert "secret_preview" in body
+
+
+def test_setup_secret_requires_force_to_overwrite(monkeypatch, tmp_path) -> None:
+    secret_path = tmp_path / "jwt_secret"
+    monkeypatch.setenv("BRIDGE_JWT_SECRET_FILE", str(secret_path))
+    secret_path.write_text("already-there\n", encoding="utf-8")
+
+    args = argparse.Namespace(secret="", force=False, show_secret=False)
+    with pytest.raises(cli.CliError) as exc:
+        cli.setup_secret(args)
+    assert "already exists" in exc.value.message

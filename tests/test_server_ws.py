@@ -1,120 +1,188 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
+import pytest
 from fastapi.testclient import TestClient
 
+import browser_bridge.server as server
 from browser_bridge.server import app
-from browser_bridge.state import SessionState, state
+from browser_bridge.state import state
 
 
-def _create_session(client: TestClient) -> dict[str, str]:
-    response = client.post("/api/sessions")
-    assert response.status_code == 200
-    return response.json()
+@pytest.fixture(autouse=True)
+def _reset_state() -> None:
+    state._clients.clear()  # type: ignore[attr-defined]
+    state._seen_request_ids.clear()  # type: ignore[attr-defined]
+    server.AUTH_MODE = "static"
+    server.SHARED_TOKEN = "test-client-token"
+    server.OPERATOR_TOKEN = "test-operator-token"
 
 
-def _get_session_state(session_id: str) -> SessionState:
-    session = asyncio.run(state.get_session(session_id))
-    assert session is not None
-    return session
+def _auth_client(ws, *, instance_id: str = "inst-1", client_id: str = "client-1", token: str = "test-client-token") -> None:
+    ws.send_json(
+        {
+            "kind": "auth",
+            "instance_id": instance_id,
+            "client_id": client_id,
+            "token": token,
+        }
+    )
+    msg = ws.receive_json()
+    assert msg["kind"] == "auth_ok"
 
 
-class _FakeWsSuccess:
-    def __init__(self, session: SessionState) -> None:
-        self._session = session
+def _auth_operator(ws, *, token: str = "test-operator-token") -> None:
+    ws.send_json({"kind": "auth", "token": token})
+    msg = ws.receive_json()
+    assert msg["kind"] == "auth_ok"
 
-    async def send_json(self, command: dict[str, Any]) -> None:
-        future = self._session.pending_results[command["command_id"]]
-        future.set_result(
+
+def test_ws_auth_success_for_client_and_operator() -> None:
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/client") as ws_client:
+        _auth_client(ws_client)
+
+    with client.websocket_connect("/ws/operator") as ws_operator:
+        _auth_operator(ws_operator)
+
+
+def test_ws_auth_failure_rejects_client() -> None:
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/client") as ws_client:
+        ws_client.send_json(
+            {
+                "kind": "auth",
+                "instance_id": "inst-1",
+                "client_id": "client-1",
+                "token": "wrong",
+            }
+        )
+        response = ws_client.receive_json()
+        assert response["kind"] == "auth_error"
+        assert response["code"] == "AUTH_FAILED"
+
+
+def test_command_result_roundtrip() -> None:
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/client") as ws_client, client.websocket_connect("/ws/operator") as ws_operator:
+        _auth_client(ws_client)
+        _auth_operator(ws_operator)
+
+        ws_operator.send_json(
+            {
+                "kind": "send_command",
+                "instance_id": "inst-1",
+                "client_id": "client-1",
+                "type": "observe",
+                "payload": {"max_nodes": 1},
+                "timeout_s": 5,
+                "request_id": "req-1",
+            }
+        )
+
+        command = ws_client.receive_json()
+        assert command["kind"] == "command"
+        assert command["type"] == "observe"
+
+        ws_client.send_json(
             {
                 "kind": "result",
                 "command_id": command["command_id"],
                 "ok": True,
-                "result": {"echo_type": command["type"]},
+                "result": {"ok": True},
             }
         )
 
-
-class _FakeWsNoReply:
-    async def send_json(self, command: dict[str, Any]) -> None:  # noqa: ARG002
-        return None
-
-
-class _FakeWsError:
-    async def send_json(self, command: dict[str, Any]) -> None:  # noqa: ARG002
-        raise RuntimeError("socket unavailable")
+        result = ws_operator.receive_json()
+        assert result["kind"] == "command_result"
+        assert result["ok"] is True
+        assert result["result"] == {"ok": True}
 
 
-def test_command_route_success_with_fake_socket() -> None:
+def test_disconnected_client_handling() -> None:
     client = TestClient(app)
-    created = _create_session(client)
-    session = _get_session_state(created["session_id"])
-    session.extension_ws = _FakeWsSuccess(session)
 
-    response = client.post(
-        f"/api/sessions/{created['session_id']}/command",
-        headers={
-            "Authorization": f"Bearer {created['agent_token']}",
-            "X-Request-ID": "req-success-1",
-        },
-        json={"type": "observe", "payload": {}, "timeout_s": 2},
-    )
+    with client.websocket_connect("/ws/operator") as ws_operator:
+        _auth_operator(ws_operator)
+        ws_operator.send_json(
+            {
+                "kind": "send_command",
+                "instance_id": "inst-1",
+                "client_id": "missing",
+                "type": "observe",
+                "payload": {},
+                "timeout_s": 1,
+                "request_id": "req-missing",
+            }
+        )
+        result = ws_operator.receive_json()
+        assert result["kind"] == "command_result"
+        assert result["ok"] is False
+        assert result["code"] == "CLIENT_NOT_CONNECTED"
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is True
-    assert body["result"]["echo_type"] == "observe"
 
-
-def test_command_route_timeout_with_fake_socket() -> None:
+def test_wrong_target_client_routing() -> None:
     client = TestClient(app)
-    created = _create_session(client)
-    session = _get_session_state(created["session_id"])
-    session.extension_ws = _FakeWsNoReply()
 
-    response = client.post(
-        f"/api/sessions/{created['session_id']}/command",
-        headers={
-            "Authorization": f"Bearer {created['agent_token']}",
-            "X-Request-ID": "req-timeout-1",
-        },
-        json={"type": "observe", "payload": {}, "timeout_s": 1},
-    )
+    with client.websocket_connect("/ws/client") as ws_client, client.websocket_connect("/ws/operator") as ws_operator:
+        _auth_client(ws_client, instance_id="inst-1", client_id="client-a")
+        _auth_operator(ws_operator)
 
-    assert response.status_code == 504
+        ws_operator.send_json(
+            {
+                "kind": "send_command",
+                "instance_id": "inst-1",
+                "client_id": "client-b",
+                "type": "observe",
+                "payload": {},
+                "timeout_s": 1,
+                "request_id": "req-wrong-target",
+            }
+        )
+        result = ws_operator.receive_json()
+        assert result["ok"] is False
+        assert result["code"] == "CLIENT_NOT_CONNECTED"
 
 
-def test_command_route_socket_error_maps_to_409() -> None:
+def test_extension_reconnect_replaces_old_socket() -> None:
     client = TestClient(app)
-    created = _create_session(client)
-    session = _get_session_state(created["session_id"])
-    session.extension_ws = _FakeWsError()
 
-    response = client.post(
-        f"/api/sessions/{created['session_id']}/command",
-        headers={
-            "Authorization": f"Bearer {created['agent_token']}",
-            "X-Request-ID": "req-sockerr-1",
-        },
-        json={"type": "observe", "payload": {}, "timeout_s": 1},
-    )
+    with (
+        client.websocket_connect("/ws/client") as ws_client_old,
+        client.websocket_connect("/ws/client") as ws_client_new,
+        client.websocket_connect("/ws/operator") as ws_operator,
+    ):
+        _auth_client(ws_client_old, instance_id="inst-1", client_id="client-1")
+        _auth_client(ws_client_new, instance_id="inst-1", client_id="client-1")
+        _auth_operator(ws_operator)
 
-    assert response.status_code == 409
-    assert "socket unavailable" in response.text
+        ws_operator.send_json(
+            {
+                "kind": "send_command",
+                "instance_id": "inst-1",
+                "client_id": "client-1",
+                "type": "ping_tab",
+                "payload": {},
+                "timeout_s": 5,
+                "request_id": "req-reconnect",
+            }
+        )
 
+        command = ws_client_new.receive_json()
+        assert command["kind"] == "command"
+        assert command["type"] == "ping_tab"
 
-def test_ping_pong_websocket_endpoint() -> None:
-    client = TestClient(app)
-    created = _create_session(client)
+        ws_client_new.send_json(
+            {
+                "kind": "result",
+                "command_id": command["command_id"],
+                "ok": True,
+                "result": {"ready": True},
+            }
+        )
 
-    with client.websocket_connect(
-        f"/ws/extension/{created['session_id']}?token={created['extension_token']}",
-        headers={"origin": "chrome-extension://devtest"},
-    ) as ws:
-        ws.send_json({"kind": "ping"})
-        pong = ws.receive_json()
-
-    assert pong["kind"] == "pong"
-    assert "ts" in pong
+        result = ws_operator.receive_json()
+        assert result["ok"] is True
+        assert result["result"] == {"ready": True}

@@ -2,198 +2,235 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
-import secrets
-import uuid
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Any
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from . import __version__
-from .state import SessionState, state, utc_now_iso
+from .secret import DEFAULT_JWT_SECRET, ensure_non_default_secret
+from .state import ClientConnection, state, utc_now_iso
 
 app = FastAPI(title="Browser Bridge", version=__version__)
+logger = logging.getLogger("browser_bridge.server")
 
-JWT_SECRET = os.getenv("BRIDGE_JWT_SECRET", "dev-insecure-change-me")
-JWT_ALG = "HS256"
-AGENT_TOKEN_TTL_S = int(os.getenv("BRIDGE_AGENT_TOKEN_TTL_S", "3600"))
-EXT_TOKEN_TTL_S = int(os.getenv("BRIDGE_EXTENSION_TOKEN_TTL_S", "86400"))
+AUTH_MODE = os.getenv("BRIDGE_AUTH_MODE", "static").strip().lower()
+APP_ENV = os.getenv("BRIDGE_ENV", "development").strip().lower()
+SHARED_TOKEN = os.getenv("BRIDGE_SHARED_TOKEN", "dev-bridge-token")
+OPERATOR_TOKEN = os.getenv("BRIDGE_OPERATOR_TOKEN", SHARED_TOKEN)
+JWT_SECRET = os.getenv("BRIDGE_JWT_SECRET", DEFAULT_JWT_SECRET)
+JWT_ALG = os.getenv("BRIDGE_JWT_ALG", "HS256")
+ENABLE_HTTP_COMPAT = os.getenv("BRIDGE_ENABLE_HTTP_COMPAT", "0") in {"1", "true", "yes"}
+MAX_MESSAGE_BYTES = int(os.getenv("BRIDGE_MAX_MESSAGE_BYTES", "1000000"))
+AUTH_TIMEOUT_S = float(os.getenv("BRIDGE_AUTH_TIMEOUT_S", "10"))
+DEFAULT_COMMAND_TIMEOUT_S = float(os.getenv("BRIDGE_DEFAULT_COMMAND_TIMEOUT_S", "20"))
+MAX_COMMAND_TIMEOUT_S = float(os.getenv("BRIDGE_MAX_COMMAND_TIMEOUT_S", "120"))
 
-DEFAULT_ALLOWED_ORIGIN_PREFIXES = ["chrome-extension://", "http://localhost", "http://127.0.0.1"]
-ALLOWED_ORIGIN_PREFIXES = [
-    value.strip()
-    for value in os.getenv("BRIDGE_ALLOWED_ORIGIN_PREFIXES", ",".join(DEFAULT_ALLOWED_ORIGIN_PREFIXES)).split(",")
-    if value.strip()
-]
+_COMMAND_ALLOWLIST_RAW = os.getenv("BRIDGE_COMMAND_ALLOWLIST", "").strip()
+COMMAND_ALLOWLIST = {v.strip() for v in _COMMAND_ALLOWLIST_RAW.split(",") if v.strip()}
 
-
-class CreateSessionResponse(BaseModel):
-    session_id: str
-    agent_token: str
-    extension_token: str
-    ws_url: str
-    agent_token_expires_at: str
-    extension_token_expires_at: str
+_ALLOWED_CLIENTS_RAW = os.getenv("BRIDGE_ALLOWED_CLIENTS", "").strip()
+ALLOWED_CLIENT_KEYS = {v.strip() for v in _ALLOWED_CLIENTS_RAW.split(",") if v.strip()}
 
 
-class SessionStatusResponse(BaseModel):
-    session_id: str
-    connected: bool
-    created_at: str
-    extension_connected_at: str | None
-    last_seen_at: str | None
-    pending_commands: int
+class ProtocolError(Exception):
+    def __init__(self, message: str, *, code: str = "PROTOCOL_ERROR") -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
 
 
-class CommandRequest(BaseModel):
-    type: str = Field(min_length=1)
-    payload: dict[str, Any] = Field(default_factory=dict)
-    timeout_s: float = Field(default=20.0, ge=1.0, le=120.0)
+@dataclass
+class AuthedClient:
+    instance_id: str
+    client_id: str
 
 
-class CommandResponse(BaseModel):
-    command_id: str
-    ok: bool
-    result: dict[str, Any] | None = None
-    error: str | None = None
+def _validate_startup_security() -> None:
+    if AUTH_MODE not in {"static", "jwt"}:
+        raise RuntimeError("BRIDGE_AUTH_MODE must be one of: static, jwt")
+
+    if APP_ENV == "production":
+        if AUTH_MODE == "static" and SHARED_TOKEN in {"", "dev-bridge-token"}:
+            raise RuntimeError("In production, BRIDGE_SHARED_TOKEN must be set to a strong value")
+        if AUTH_MODE == "jwt" and JWT_SECRET in {"", DEFAULT_JWT_SECRET}:
+            raise RuntimeError("In production, BRIDGE_JWT_SECRET must be set to a strong value")
 
 
-def _issue_token(session_id: str, role: str, ttl_s: int) -> tuple[str, str]:
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(seconds=ttl_s)
-    claims = {
-        "sub": session_id,
-        "role": role,
-        "iat": int(now.timestamp()),
-        "exp": int(expires.timestamp()),
-        "jti": uuid.uuid4().hex,
-    }
-    return jwt.encode(claims, JWT_SECRET, algorithm=JWT_ALG), expires.isoformat()
+def bootstrap_server_auth_secret_for_local_use() -> None:
+    global JWT_SECRET
+    if AUTH_MODE != "jwt":
+        return
+    secret, path, created = ensure_non_default_secret(JWT_SECRET)
+    if secret != JWT_SECRET:
+        JWT_SECRET = secret
+        if created:
+            logger.warning("Generated local BRIDGE_JWT_SECRET at %s", path)
+        else:
+            logger.info("Loaded local BRIDGE_JWT_SECRET from %s", path)
 
 
-def _decode_token(token: str) -> dict[str, Any]:
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    text = json.dumps(payload)
+    if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise ProtocolError("Outgoing message exceeds max payload size", code="PAYLOAD_TOO_LARGE")
+    return text
+
+
+async def _send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    await websocket.send_text(_safe_json_dumps(payload))
+
+
+async def _recv_json(websocket: WebSocket, *, timeout_s: float | None = None) -> dict[str, Any]:
+    try:
+        text = await asyncio.wait_for(websocket.receive_text(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise ProtocolError("Timed out waiting for message", code="TIMEOUT") from exc
+    if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise ProtocolError("Incoming message exceeds max payload size", code="PAYLOAD_TOO_LARGE")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProtocolError("Invalid JSON payload", code="BAD_JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ProtocolError("Payload must be an object", code="BAD_PAYLOAD")
+    return parsed
+
+
+def _jwt_claims(token: str) -> dict[str, Any]:
     try:
         claims = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+        raise ProtocolError("Invalid or expired JWT", code="AUTH_FAILED") from exc
     if not isinstance(claims, dict):
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        raise ProtocolError("Invalid JWT payload", code="AUTH_FAILED")
     return claims
 
 
-def _ensure_role_and_session(claims: dict[str, Any], expected_role: str, session_id: str) -> None:
-    role = claims.get("role")
-    sub = claims.get("sub")
-    if role != expected_role or sub != session_id:
-        raise HTTPException(status_code=401, detail="Token role/session mismatch")
+def _validate_client_allowlist(instance_id: str, client_id: str) -> None:
+    if not ALLOWED_CLIENT_KEYS:
+        return
+    key = f"{instance_id}:{client_id}"
+    if key not in ALLOWED_CLIENT_KEYS:
+        raise ProtocolError("Client is not in allowed list", code="AUTH_FAILED")
 
 
-def _extract_bearer(auth_header: str | None) -> str:
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    parts = auth_header.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
-        raise HTTPException(status_code=401, detail="Authorization must be Bearer token")
-    return parts[1].strip()
+def _auth_client(payload: dict[str, Any]) -> AuthedClient:
+    if payload.get("kind") != "auth":
+        raise ProtocolError("First message must be auth", code="AUTH_REQUIRED")
+
+    instance_id = str(payload.get("instance_id") or "").strip()
+    client_id = str(payload.get("client_id") or "").strip()
+    token = str(payload.get("token") or "").strip()
+
+    if not instance_id or not client_id:
+        raise ProtocolError("instance_id and client_id are required", code="AUTH_FAILED")
+    if not token:
+        raise ProtocolError("token is required", code="AUTH_FAILED")
+
+    if AUTH_MODE == "static":
+        if token != SHARED_TOKEN:
+            raise ProtocolError("Invalid token", code="AUTH_FAILED")
+        _validate_client_allowlist(instance_id, client_id)
+    else:
+        claims = _jwt_claims(token)
+        role = str(claims.get("role") or "")
+        if role and role != "client":
+            raise ProtocolError("JWT role mismatch", code="AUTH_FAILED")
+        claim_instance = str(claims.get("instance_id") or "")
+        claim_client = str(claims.get("client_id") or "")
+        if claim_instance != instance_id or claim_client != client_id:
+            raise ProtocolError("JWT instance/client mismatch", code="AUTH_FAILED")
+
+    return AuthedClient(instance_id=instance_id, client_id=client_id)
 
 
-def _origin_allowed(origin: str | None) -> bool:
-    if origin is None:
-        return False
-    return any(origin.startswith(prefix) for prefix in ALLOWED_ORIGIN_PREFIXES)
+def _auth_operator(payload: dict[str, Any]) -> None:
+    if payload.get("kind") != "auth":
+        raise ProtocolError("First message must be auth", code="AUTH_REQUIRED")
+
+    token = str(payload.get("token") or "").strip()
+    if not token:
+        raise ProtocolError("token is required", code="AUTH_FAILED")
+
+    if AUTH_MODE == "static":
+        if token != OPERATOR_TOKEN:
+            raise ProtocolError("Invalid operator token", code="AUTH_FAILED")
+    else:
+        claims = _jwt_claims(token)
+        role = str(claims.get("role") or "")
+        if role != "operator":
+            raise ProtocolError("JWT role mismatch", code="AUTH_FAILED")
 
 
-async def get_agent_session(
-    session_id: str,
-    authorization: str | None = Header(default=None),
-) -> SessionState:
-    token = _extract_bearer(authorization)
-    claims = _decode_token(token)
-    _ensure_role_and_session(claims=claims, expected_role="agent", session_id=session_id)
-
-    session = await state.get_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/api/sessions", response_model=CreateSessionResponse)
-async def create_session(base_ws_url: str = Query(default="ws://127.0.0.1:8765")) -> CreateSessionResponse:
-    session = await state.create_session()
-    agent_token, agent_exp = _issue_token(session.session_id, "agent", AGENT_TOKEN_TTL_S)
-    extension_token, ext_exp = _issue_token(session.session_id, "extension", EXT_TOKEN_TTL_S)
-    return CreateSessionResponse(
-        session_id=session.session_id,
-        agent_token=agent_token,
-        extension_token=extension_token,
-        ws_url=(
-            f"{base_ws_url}/ws/extension/{session.session_id}"
-            f"?token={extension_token}"
-        ),
-        agent_token_expires_at=agent_exp,
-        extension_token_expires_at=ext_exp,
-    )
-
-
-@app.get("/api/sessions/{session_id}", response_model=SessionStatusResponse)
-async def session_status(session: SessionState = Depends(get_agent_session)) -> SessionStatusResponse:
-    return SessionStatusResponse(
-        session_id=session.session_id,
-        connected=session.extension_ws is not None,
-        created_at=session.created_at,
-        extension_connected_at=session.extension_connected_at,
-        last_seen_at=session.last_seen_at,
-        pending_commands=len(session.pending_results),
-    )
-
-
-@app.post("/api/sessions/{session_id}/command", response_model=CommandResponse)
-async def send_command(
-    payload: CommandRequest,
-    request_id: str | None = Header(default=None, alias="X-Request-ID"),
-    session: SessionState = Depends(get_agent_session),
-) -> CommandResponse:
-    if not request_id:
-        raise HTTPException(status_code=400, detail="Missing X-Request-ID header")
-
-    not_duplicate = await state.register_request_id(session_id=session.session_id, request_id=request_id)
-    if not not_duplicate:
-        raise HTTPException(status_code=409, detail="Duplicate X-Request-ID (possible replay)")
-
-    ws = session.extension_ws
-    if ws is None:
-        raise HTTPException(status_code=409, detail="Extension is not connected")
-
-    command_id = secrets.token_urlsafe(10)
-    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-    session.pending_results[command_id] = future
-
-    command = {
-        "kind": "command",
-        "command_id": command_id,
-        "type": payload.type,
-        "payload": payload.payload,
-        "sent_at": utc_now_iso(),
-        "request_id": request_id,
+def _to_client_summary(conn: ClientConnection) -> dict[str, Any]:
+    return {
+        "instance_id": conn.instance_id,
+        "client_id": conn.client_id,
+        "connected_at": conn.connected_at,
+        "last_seen_at": conn.last_seen_at,
     }
 
+
+async def _send_command_to_client(request: dict[str, Any]) -> dict[str, Any]:
+    instance_id = str(request.get("instance_id") or "").strip()
+    client_id = str(request.get("client_id") or "").strip()
+    command_type = str(request.get("type") or "").strip()
+
+    if not instance_id or not client_id:
+        raise ProtocolError("instance_id and client_id are required", code="BAD_REQUEST")
+    if not command_type:
+        raise ProtocolError("type is required", code="BAD_REQUEST")
+    if COMMAND_ALLOWLIST and command_type not in COMMAND_ALLOWLIST:
+        raise ProtocolError(f"Command type not allowed: {command_type}", code="COMMAND_NOT_ALLOWED")
+
+    payload = request.get("payload", {})
+    if not isinstance(payload, dict):
+        raise ProtocolError("payload must be an object", code="BAD_REQUEST")
+
+    timeout_s_raw = request.get("timeout_s", DEFAULT_COMMAND_TIMEOUT_S)
     try:
-        await ws.send_json(command)
-        raw_result = await asyncio.wait_for(future, timeout=payload.timeout_s)
+        timeout_s = float(timeout_s_raw)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError("timeout_s must be numeric", code="BAD_REQUEST") from exc
+    timeout_s = max(1.0, min(timeout_s, MAX_COMMAND_TIMEOUT_S))
+
+    request_id = str(request.get("request_id") or "").strip()
+    if not request_id:
+        raise ProtocolError("request_id is required", code="BAD_REQUEST")
+
+    not_duplicate = await state.register_request_id(request_id=request_id)
+    if not not_duplicate:
+        raise ProtocolError("Duplicate request_id", code="DUPLICATE_REQUEST")
+
+    conn = await state.get_client(instance_id=instance_id, client_id=client_id)
+    if conn is None:
+        raise ProtocolError("Target client not connected", code="CLIENT_NOT_CONNECTED")
+
+    command_id = state.new_command_id()
+    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    conn.pending_results[command_id] = future
+
+    try:
+        await _send_json(
+            conn.websocket,
+            {
+                "kind": "command",
+                "command_id": command_id,
+                "type": command_type,
+                "payload": payload,
+                "request_id": request_id,
+                "sent_at": utc_now_iso(),
+            },
+        )
+        raw_result = await asyncio.wait_for(future, timeout=timeout_s)
     except asyncio.TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Command timed out") from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail="Extension socket unavailable") from exc
+        raise ProtocolError("Command timed out", code="TIMEOUT") from exc
     finally:
-        session.pending_results.pop(command_id, None)
+        conn.pending_results.pop(command_id, None)
 
     ok = bool(raw_result.get("ok", False))
     result = raw_result.get("result")
@@ -201,71 +238,168 @@ async def send_command(
     if result is not None and not isinstance(result, dict):
         result = {"value": result}
 
-    return CommandResponse(command_id=command_id, ok=ok, result=result, error=error)
+    return {
+        "kind": "command_result",
+        "command_id": command_id,
+        "ok": ok,
+        "result": result,
+        "error": error,
+        "request_id": request_id,
+    }
 
 
-@app.websocket("/ws/extension/{session_id}")
-async def extension_ws(websocket: WebSocket, session_id: str, token: str = Query(...)) -> None:
-    origin = websocket.headers.get("origin")
-    if not _origin_allowed(origin):
-        await websocket.close(code=1008, reason="Origin not allowed")
-        return
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
-    claims = _decode_token(token)
-    _ensure_role_and_session(claims=claims, expected_role="extension", session_id=session_id)
 
-    session = await state.get_session(session_id)
-    if session is None:
-        await websocket.close(code=1008, reason="Session does not exist")
-        return
-
+@app.websocket("/ws/client")
+async def ws_client(websocket: WebSocket) -> None:
     await websocket.accept()
 
-    if session.extension_ws is not None:
-        await session.extension_ws.close(code=1012, reason="Replaced by a new connection")
-
-    session.extension_ws = websocket
-    session.extension_connected_at = utc_now_iso()
-    session.last_seen_at = utc_now_iso()
-
+    authed: AuthedClient | None = None
     try:
-        while True:
-            message = await websocket.receive_text()
-            session.last_seen_at = utc_now_iso()
-            parsed = json.loads(message)
-            if not isinstance(parsed, dict):
-                continue
+        auth_msg = await _recv_json(websocket, timeout_s=AUTH_TIMEOUT_S)
+        authed = _auth_client(auth_msg)
+        await state.register_client(
+            instance_id=authed.instance_id,
+            client_id=authed.client_id,
+            websocket=websocket,
+        )
+        await _send_json(
+            websocket,
+            {
+                "kind": "auth_ok",
+                "instance_id": authed.instance_id,
+                "client_id": authed.client_id,
+                "ts": utc_now_iso(),
+            },
+        )
 
-            kind = parsed.get("kind")
+        while True:
+            message = await _recv_json(websocket)
+            conn = await state.get_client(instance_id=authed.instance_id, client_id=authed.client_id)
+            if conn:
+                conn.last_seen_at = utc_now_iso()
+
+            kind = message.get("kind")
             if kind == "result":
-                command_id = parsed.get("command_id")
-                if not isinstance(command_id, str):
+                command_id = str(message.get("command_id") or "").strip()
+                if not command_id or conn is None:
                     continue
-                future = session.pending_results.get(command_id)
+                future = conn.pending_results.get(command_id)
                 if future and not future.done():
-                    future.set_result(parsed)
+                    future.set_result(message)
             elif kind == "ping":
-                await websocket.send_json({"kind": "pong", "ts": utc_now_iso()})
+                await _send_json(websocket, {"kind": "pong", "ts": utc_now_iso()})
     except WebSocketDisconnect:
         pass
+    except ProtocolError as exc:
+        await _send_json(websocket, {"kind": "auth_error", "code": exc.code, "error": exc.message})
+        await websocket.close(code=1008, reason=exc.message)
     finally:
-        if session.extension_ws is websocket:
-            session.extension_ws = None
-        for command_id, future in list(session.pending_results.items()):
-            if not future.done():
-                future.set_result(
+        if authed:
+            await state.remove_client(
+                instance_id=authed.instance_id,
+                client_id=authed.client_id,
+                websocket=websocket,
+            )
+
+
+@app.websocket("/ws/operator")
+async def ws_operator(websocket: WebSocket) -> None:
+    await websocket.accept()
+
+    try:
+        auth_msg = await _recv_json(websocket, timeout_s=AUTH_TIMEOUT_S)
+        _auth_operator(auth_msg)
+        await _send_json(websocket, {"kind": "auth_ok", "ts": utc_now_iso()})
+
+        while True:
+            message = await _recv_json(websocket)
+            kind = message.get("kind")
+
+            if kind == "ping":
+                await _send_json(websocket, {"kind": "pong", "ts": utc_now_iso()})
+                continue
+
+            if kind == "list_clients":
+                clients = [_to_client_summary(c) for c in await state.list_clients()]
+                await _send_json(websocket, {"kind": "clients", "clients": clients, "ts": utc_now_iso()})
+                continue
+
+            if kind == "connect_status":
+                instance_id = str(message.get("instance_id") or "").strip()
+                client_id = str(message.get("client_id") or "").strip()
+                if not instance_id or not client_id:
+                    raise ProtocolError("instance_id and client_id are required", code="BAD_REQUEST")
+                conn = await state.get_client(instance_id=instance_id, client_id=client_id)
+                await _send_json(
+                    websocket,
                     {
-                        "kind": "result",
-                        "command_id": command_id,
-                        "ok": False,
-                        "error": "Extension disconnected",
-                    }
+                        "kind": "connect_status",
+                        "instance_id": instance_id,
+                        "client_id": client_id,
+                        "connected": conn is not None,
+                        "connected_at": conn.connected_at if conn else None,
+                        "last_seen_at": conn.last_seen_at if conn else None,
+                        "ts": utc_now_iso(),
+                    },
                 )
+                continue
+
+            if kind == "send_command":
+                try:
+                    result = await _send_command_to_client(message)
+                    await _send_json(websocket, result)
+                except ProtocolError as exc:
+                    await _send_json(
+                        websocket,
+                        {
+                            "kind": "command_result",
+                            "ok": False,
+                            "error": exc.message,
+                            "code": exc.code,
+                            "request_id": str(message.get("request_id") or ""),
+                        },
+                    )
+                continue
+
+            raise ProtocolError(f"Unsupported operator message kind: {kind}", code="BAD_REQUEST")
+
+    except WebSocketDisconnect:
+        return
+    except ProtocolError as exc:
+        await _send_json(websocket, {"kind": "auth_error", "code": exc.code, "error": exc.message})
+        await websocket.close(code=1008, reason=exc.message)
+
+
+@app.post("/api/sessions")
+async def deprecated_create_session() -> dict[str, Any]:
+    if not ENABLE_HTTP_COMPAT:
+        raise HTTPException(status_code=410, detail="HTTP session APIs are disabled. Use WS auth protocol.")
+    raise HTTPException(status_code=501, detail="HTTP compatibility mode is not implemented in this build.")
+
+
+@app.get("/api/sessions/{session_id}")
+async def deprecated_session_status(session_id: str) -> dict[str, Any]:
+    if not ENABLE_HTTP_COMPAT:
+        raise HTTPException(status_code=410, detail="HTTP session APIs are disabled. Use WS connect_status.")
+    raise HTTPException(status_code=501, detail="HTTP compatibility mode is not implemented in this build.")
+
+
+@app.post("/api/sessions/{session_id}/command")
+async def deprecated_send_command(session_id: str) -> dict[str, Any]:
+    if not ENABLE_HTTP_COMPAT:
+        raise HTTPException(status_code=410, detail="HTTP command APIs are disabled. Use WS send_command.")
+    raise HTTPException(status_code=501, detail="HTTP compatibility mode is not implemented in this build.")
 
 
 def main() -> None:
     import uvicorn
 
+    bootstrap_server_auth_secret_for_local_use()
+    _validate_startup_security()
     uvicorn.run("browser_bridge.server:app", host="0.0.0.0", port=8765, reload=False)
 
 

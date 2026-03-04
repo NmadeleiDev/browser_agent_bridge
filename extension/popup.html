@@ -11,29 +11,24 @@
       <h1>Browser Bridge</h1>
 
       <label>
-        Bridge Server Base URL
-        <input id="serverBaseUrl" placeholder="https://<instance-host>" />
+        Bridge Server WS URL
+        <input id="wsUrl" placeholder="wss://bridge.example.com/ws/client" />
       </label>
 
       <label>
-        Session ID
-        <input id="sessionId" placeholder="Session ID" />
+        Instance ID
+        <input id="instanceId" placeholder="instance-1" />
       </label>
 
       <label>
-        Extension Token
-        <input id="extensionToken" placeholder="Extension token" />
+        Client ID
+        <input id="clientId" placeholder="chrome-main" />
       </label>
 
-      <details>
-        <summary>Advanced (explicit WebSocket URL override)</summary>
-        <label>
-          WebSocket URL
-          <input id="wsUrl" placeholder="wss://<instance-host>/ws/extension/<session>?token=<token>" />
-        </label>
-      </details>
-
-      <p id="effectiveWs" class="derived">Effective WS: -</p>
+      <label>
+        Auth Token / JWT
+        <input id="authToken" placeholder="token or jwt" />
+      </label>
 
       <div class="buttons">
         <button id="saveBtn">Save</button>

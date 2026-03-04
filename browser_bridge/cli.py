@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 import sys
 import uuid
 from typing import Any
 
-import httpx
+import websockets
+from websockets.exceptions import ConnectionClosed
 
 from . import __version__
+from .secret import secret_file_path, setup_local_secret
 
-CONFIG_ENV_VAR = "BROWSER_BRIDGE_CONFIG"
-DEFAULT_CONFIG_PATH = "~/.browser_bridge/sessions.json"
 LOG_LEVEL_ENV_VAR = "BROWSER_BRIDGE_LOG_LEVEL"
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_OPERATOR_WS_URL = "ws://127.0.0.1:8765/ws/operator"
+DEFAULT_OPERATOR_TOKEN = "dev-bridge-token"
+TOKEN_ENV_VAR = "BRIDGE_OPERATOR_TOKEN"
+MAX_MESSAGE_BYTES = int(os.getenv("BRIDGE_MAX_MESSAGE_BYTES", "1000000"))
 
 logger = logging.getLogger("browser_bridge.cli")
 
@@ -42,202 +46,131 @@ def _configure_logging() -> None:
     logger.propagate = False
 
 
-def _config_path() -> Path:
-    return Path(os.getenv(CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH)).expanduser()
-
-
-def _load_config() -> dict[str, Any]:
-    path = _config_path()
-    if not path.exists():
-        return {"version": 1, "default_session_name": None, "sessions": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise CliError(
-            f"Invalid JSON in config file: {path}",
-            hint=f"Fix or remove this file, or set {CONFIG_ENV_VAR} to a clean path.",
-        ) from exc
-    if not isinstance(data, dict):
-        raise CliError(
-            f"Invalid config format in {path}",
-            hint="Config root must be a JSON object.",
-        )
-    if "sessions" not in data or not isinstance(data["sessions"], dict):
-        data["sessions"] = {}
-    if "default_session_name" not in data:
-        data["default_session_name"] = None
-    if "version" not in data:
-        data["version"] = 1
-    return data
-
-
-def _save_config(config: dict[str, Any]) -> None:
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
-    session_id = getattr(args, "session_id", "") or ""
-    agent_token = getattr(args, "agent_token", "") or ""
-    if session_id and agent_token:
-        return session_id, agent_token
-
-    config = _load_config()
-    sessions = config.get("sessions", {})
-    name = getattr(args, "name", "") or config.get("default_session_name")
-    if not name:
-        raise CliError(
-            "Missing credentials",
-            hint=(
-                "Pass --session-id and --agent-token, or create and use a named profile: "
-                "`browser-bridge create-session --name local` then `--name local`."
-            ),
-        )
-
-    profile = sessions.get(name)
-    if not isinstance(profile, dict):
-        raise CliError(
-            f'Session profile "{name}" not found in {_config_path()}',
-            hint="Run create-session with --name to create it, or pass explicit credentials.",
-        )
-
-    stored_session_id = profile.get("session_id")
-    stored_agent_token = profile.get("agent_token")
-    if not stored_session_id or not stored_agent_token:
-        raise CliError(
-            f'Session profile "{name}" is missing session_id or agent_token',
-            hint="Re-create the profile with `create-session --name <name>`.",
-        )
-    return str(stored_session_id), str(stored_agent_token)
-
-
 def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _http_error_to_cli_error(exc: httpx.HTTPStatusError, *, action: str) -> CliError:
-    detail = exc.response.text.strip()
-    hint: str | None = None
-    if exc.response.status_code == 401:
-        hint = "Token expired/invalid. Create a fresh session or use correct credentials."
-    elif exc.response.status_code == 404:
-        hint = "Session not found. Create a new session and reconnect extension."
-    elif exc.response.status_code == 409:
-        hint = "Session not connected or duplicate request ID. Reconnect extension and retry."
-    elif exc.response.status_code == 504:
-        hint = "Command timed out. Ensure extension is connected and tab is controllable."
-    return CliError(
-        f"{action} failed: HTTP {exc.response.status_code} {detail}",
-        hint=hint,
-        exit_code=1,
-    )
+def _token_from_args(args: argparse.Namespace) -> str:
+    token = str(getattr(args, "token", "") or os.getenv(TOKEN_ENV_VAR, DEFAULT_OPERATOR_TOKEN)).strip()
+    if not token:
+        raise CliError(
+            "Missing operator token",
+            hint=f"Pass --token or set {TOKEN_ENV_VAR}.",
+        )
+    return token
 
 
-def _request_error_to_cli_error(exc: httpx.RequestError, *, action: str) -> CliError:
-    if isinstance(exc, httpx.TimeoutException):
-        return CliError(
-            f"{action} failed: request timed out",
-            hint="Verify server responsiveness/network path and increase --timeout-s if needed.",
+async def _send_and_recv(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    url = str(args.server_ws_url).strip()
+    if not url:
+        raise CliError("Missing --server-ws-url")
+
+    token = _token_from_args(args)
+
+    try:
+        async with websockets.connect(url, max_size=MAX_MESSAGE_BYTES) as ws:
+            await ws.send(json.dumps({"kind": "auth", "token": token}))
+            auth_raw = await ws.recv()
+            auth = json.loads(auth_raw)
+            if auth.get("kind") != "auth_ok":
+                message = str(auth.get("error") or "authentication failed")
+                code = str(auth.get("code") or "AUTH_FAILED")
+                raise CliError(f"Operator auth failed: {code} {message}", exit_code=1)
+
+            await ws.send(json.dumps(payload))
+            raw = await ws.recv()
+            return json.loads(raw)
+    except CliError:
+        raise
+    except ConnectionClosed as exc:
+        raise CliError(
+            f"Connection closed: {exc}",
+            hint="Verify server URL/token and that the bridge server is running.",
+            exit_code=1,
+        ) from exc
+    except OSError as exc:
+        raise CliError(
+            f"Cannot connect to operator WS `{url}`",
+            hint="Verify server URL/reachability and TLS settings (ws/wss).",
+            exit_code=1,
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise CliError(f"Invalid JSON response from server: {exc}", exit_code=1) from exc
+
+
+def _result_or_raise(result: dict[str, Any], *, action: str) -> dict[str, Any]:
+    kind = str(result.get("kind") or "")
+    if kind == "auth_error":
+        raise CliError(
+            f"{action} failed: {result.get('code', 'AUTH_FAILED')} {result.get('error', '')}".strip(),
             exit_code=1,
         )
-    return CliError(
-        f"{action} failed: cannot reach server `{exc.request.url}`",
-        hint="Verify --server URL, that browser_bridge.server is running, and network access is allowed.",
-        exit_code=1,
-    )
+    return result
 
 
-def create_session(args: argparse.Namespace) -> int:
-    logger.info("Creating session at %s", args.server)
-    try:
-        response = httpx.post(
-            f"{args.server}/api/sessions",
-            params={"base_ws_url": args.ws_base},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise _http_error_to_cli_error(exc, action="create-session") from exc
-    except httpx.RequestError as exc:
-        raise _request_error_to_cli_error(exc, action="create-session") from exc
-
-    body = response.json()
-    if args.name:
-        config = _load_config()
-        config["sessions"][args.name] = {
-            "server": args.server,
-            "session_id": body["session_id"],
-            "agent_token": body["agent_token"],
-            "created_at": body.get("agent_token_expires_at"),
-        }
-        if args.make_default:
-            config["default_session_name"] = args.name
-        _save_config(config)
-        logger.info('Saved session profile "%s" to %s', args.name, _config_path())
-        body["saved_as"] = args.name
-        body["config_path"] = str(_config_path())
-    _print_json(body)
+def list_clients(args: argparse.Namespace) -> int:
+    logger.info("Listing connected clients")
+    result = asyncio.run(_send_and_recv(args, {"kind": "list_clients"}))
+    result = _result_or_raise(result, action="list-clients")
+    _print_json(result)
     return 0
 
 
-def session_status(args: argparse.Namespace) -> int:
-    session_id, agent_token = _resolve_credentials(args)
-    logger.debug("Fetching session status: session_id=%s", session_id)
-    try:
-        response = httpx.get(
-            f"{args.server}/api/sessions/{session_id}",
-            headers={"Authorization": f"Bearer {agent_token}"},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise _http_error_to_cli_error(exc, action="status") from exc
-    except httpx.RequestError as exc:
-        raise _request_error_to_cli_error(exc, action="status") from exc
-
-    _print_json(response.json())
+def connect_status(args: argparse.Namespace) -> int:
+    payload = {
+        "kind": "connect_status",
+        "instance_id": args.instance_id,
+        "client_id": args.client_id,
+    }
+    logger.info("Checking connect status instance_id=%s client_id=%s", args.instance_id, args.client_id)
+    result = asyncio.run(_send_and_recv(args, payload))
+    result = _result_or_raise(result, action="connect-status")
+    _print_json(result)
     return 0
 
 
 def send_command(args: argparse.Namespace) -> int:
-    session_id, agent_token = _resolve_credentials(args)
-    payload: dict[str, Any]
-    if args.payload:
-        try:
-            payload = json.loads(args.payload)
-        except json.JSONDecodeError as exc:
-            raise CliError(
-                f"Invalid JSON for --payload: {exc.msg}",
-                hint='Pass valid JSON, e.g. --payload \'{"url":"https://example.com"}\'.',
-            ) from exc
-    else:
-        payload = {}
+    try:
+        payload = json.loads(args.payload or "{}")
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            f"Invalid JSON for --payload: {exc.msg}",
+            hint='Pass valid JSON, e.g. --payload \'{"url":"https://example.com"}\'.',
+        ) from exc
     if not isinstance(payload, dict):
         raise CliError("Invalid --payload type", hint="Payload must be a JSON object.")
 
     request_id = args.request_id or uuid.uuid4().hex
+    wire = {
+        "kind": "send_command",
+        "instance_id": args.instance_id,
+        "client_id": args.client_id,
+        "type": args.command_type,
+        "payload": payload,
+        "timeout_s": args.timeout_s,
+        "request_id": request_id,
+    }
 
-    logger.info("Sending command=%s session_id=%s request_id=%s", args.command_type, session_id, request_id)
-    try:
-        response = httpx.post(
-            f"{args.server}/api/sessions/{session_id}/command",
-            headers={
-                "Authorization": f"Bearer {agent_token}",
-                "X-Request-ID": request_id,
-            },
-            json={"type": args.command_type, "payload": payload, "timeout_s": args.timeout_s},
-            timeout=args.timeout_s + 10.0,
+    logger.info(
+        "Sending command=%s instance_id=%s client_id=%s request_id=%s",
+        args.command_type,
+        args.instance_id,
+        args.client_id,
+        request_id,
+    )
+    result = asyncio.run(_send_and_recv(args, wire))
+    result = _result_or_raise(result, action=f"command {args.command_type}")
+
+    if not bool(result.get("ok", False)):
+        code = str(result.get("code") or "COMMAND_FAILED")
+        message = str(result.get("error") or "unknown error")
+        raise CliError(
+            f"command {args.command_type} failed: {code} {message}",
+            hint="Check connect-status/list-clients, request timeout, and target instance/client IDs.",
+            exit_code=1,
         )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise _http_error_to_cli_error(exc, action=f"command {args.command_type}") from exc
-    except httpx.RequestError as exc:
-        raise _request_error_to_cli_error(exc, action=f"command {args.command_type}") from exc
 
-    body = response.json()
-    body["request_id"] = request_id
-    _print_json(body)
+    _print_json(result)
     return 0
 
 
@@ -247,52 +180,87 @@ def observe(args: argparse.Namespace) -> int:
     return send_command(args)
 
 
+def ping_tab(args: argparse.Namespace) -> int:
+    args.command_type = "ping_tab"
+    args.payload = "{}"
+    return send_command(args)
+
+
+def setup_secret(args: argparse.Namespace) -> int:
+    try:
+        secret, path = setup_local_secret(secret=args.secret, overwrite=args.force)
+    except FileExistsError as exc:
+        raise CliError(
+            str(exc),
+            hint="Use --force to overwrite or reuse the existing secret file.",
+            exit_code=1,
+        ) from exc
+    except RuntimeError as exc:
+        raise CliError(f"setup-secret failed: {exc}", exit_code=1) from exc
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "secret_file": str(path),
+    }
+    if args.show_secret:
+        payload["secret"] = secret
+    else:
+        payload["secret_preview"] = f"{secret[:6]}...{secret[-4:]}"
+    _print_json(payload)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Browser Bridge CLI")
-    parser.add_argument("--server", default="http://127.0.0.1:8765", help="Server base URL")
+    parser = argparse.ArgumentParser(description="Browser Bridge CLI (WS-only)")
+    parser.add_argument("--server-ws-url", default=DEFAULT_OPERATOR_WS_URL, help="Operator websocket URL")
+    parser.add_argument("--token", default="", help=f"Operator token (or {TOKEN_ENV_VAR})")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    create = subparsers.add_parser("create-session", help="Create a new bridge session")
-    create.add_argument(
-        "--ws-base",
-        default="ws://127.0.0.1:8765",
-        help="Public websocket base URL for extension connection",
+    setup_cmd = subparsers.add_parser(
+        "setup-secret",
+        help=(
+            "Create and save local server JWT secret. "
+            "Server auto-loads this on startup when BRIDGE_JWT_SECRET is still default."
+        ),
     )
-    create.add_argument("--name", default="", help="Save session credentials under this local profile name")
-    create.add_argument(
-        "--make-default",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="When --name is set, make this profile the default for future commands",
-    )
-    create.set_defaults(func=create_session)
+    setup_cmd.add_argument("--secret", default="", help="Optional explicit secret value")
+    setup_cmd.add_argument("--force", action="store_true", help=f"Overwrite existing secret file at {secret_file_path()}")
+    setup_cmd.add_argument("--show-secret", action="store_true", help="Print full secret in output")
+    setup_cmd.set_defaults(func=setup_secret)
 
-    status = subparsers.add_parser("status", help="Show session status")
-    status.add_argument("--session-id", default="")
-    status.add_argument("--agent-token", default="")
-    status.add_argument("--name", default="", help="Local saved profile name")
-    status.set_defaults(func=session_status)
+    list_cmd = subparsers.add_parser("list-clients", help="List connected browser clients")
+    list_cmd.set_defaults(func=list_clients)
 
-    command = subparsers.add_parser("command", help="Send raw command")
-    command.add_argument("--session-id", default="")
-    command.add_argument("--agent-token", default="")
-    command.add_argument("--name", default="", help="Local saved profile name")
-    command.add_argument("--type", dest="command_type", required=True)
-    command.add_argument("--payload", default="{}", help="JSON payload string")
-    command.add_argument("--timeout-s", type=float, default=20.0)
-    command.add_argument("--request-id", default="", help="Optional idempotency key; auto-generated if omitted")
-    command.set_defaults(func=send_command)
+    status_cmd = subparsers.add_parser("connect-status", help="Check if a client is connected")
+    status_cmd.add_argument("--instance-id", required=True)
+    status_cmd.add_argument("--client-id", required=True)
+    status_cmd.set_defaults(func=connect_status)
+
+    send_cmd = subparsers.add_parser("send-command", help="Send raw command to connected client")
+    send_cmd.add_argument("--instance-id", required=True)
+    send_cmd.add_argument("--client-id", required=True)
+    send_cmd.add_argument("--type", dest="command_type", required=True)
+    send_cmd.add_argument("--payload", default="{}", help="JSON payload string")
+    send_cmd.add_argument("--timeout-s", type=float, default=20.0)
+    send_cmd.add_argument("--request-id", default="", help="Optional idempotency key; auto-generated if omitted")
+    send_cmd.set_defaults(func=send_command)
 
     observe_cmd = subparsers.add_parser("observe", help="Get simplified page snapshot")
-    observe_cmd.add_argument("--session-id", default="")
-    observe_cmd.add_argument("--agent-token", default="")
-    observe_cmd.add_argument("--name", default="", help="Local saved profile name")
+    observe_cmd.add_argument("--instance-id", required=True)
+    observe_cmd.add_argument("--client-id", required=True)
     observe_cmd.add_argument("--max-nodes", type=int, default=150)
     observe_cmd.add_argument("--timeout-s", type=float, default=20.0)
     observe_cmd.add_argument("--request-id", default="", help="Optional idempotency key; auto-generated if omitted")
     observe_cmd.set_defaults(func=observe)
+
+    ping_cmd = subparsers.add_parser("ping-tab", help="Check if active tab content script is reachable")
+    ping_cmd.add_argument("--instance-id", required=True)
+    ping_cmd.add_argument("--client-id", required=True)
+    ping_cmd.add_argument("--timeout-s", type=float, default=8.0)
+    ping_cmd.add_argument("--request-id", default="", help="Optional idempotency key; auto-generated if omitted")
+    ping_cmd.set_defaults(func=ping_tab)
 
     return parser
 
@@ -308,7 +276,7 @@ def main() -> int:
         if exc.hint:
             logger.error("Hint: %s", exc.hint)
         return int(exc.exit_code)
-    except Exception as exc:  # pragma: no cover - CLI safety net
+    except Exception as exc:  # pragma: no cover
         logger.exception("Unexpected error: %s", exc)
         return 1
 

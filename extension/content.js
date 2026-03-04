@@ -297,6 +297,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const payload = message?.payload || {};
 
     switch (type) {
+      case "ping":
+        return { ready: true, url: window.location.href, title: document.title };
       case "observe":
         return observe(payload);
       case "click":

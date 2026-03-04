@@ -1,20 +1,67 @@
 # browser-agent-bridge
 
-Browser Bridge server + CLI for controlling a Chrome extension over WebSocket.
+WebSocket-only browser bridge for remotely controlling a local Chrome extension.
 
-This repository contains:
+## Architecture (WS-only)
 
-- Python package: `browser_bridge/` (server + CLI)
-- Chrome extension: `extension/` (unpacked dev-mode install)
+```text
+Operator CLI (remote/local)
+    |
+    |  ws(s)://.../ws/operator   (auth)
+    v
+Bridge Server
+    ^
+    |  ws(s)://.../ws/client     (auth)
+    |
+Chrome Extension (local browser)
+    |
+    +-- content script commands: observe/click/type/get_html/ping_tab/etc.
+```
 
-## Features
+The extension connects outbound to server. Operator sends commands through server to a specific `(instance_id, client_id)`.
 
-- Session-based auth with separate `agent_token` and `extension_token`
-- FastAPI server with HTTP command API + extension WebSocket endpoint
-- CLI for session creation, status checks, and command execution
-- Replay protection via `X-Request-ID`
+## Protocol
 
-## Install (Recommended: pipx)
+### Client -> Server
+- `auth`: `{kind, instance_id, client_id, token}`
+- `result`: `{kind, command_id, ok, result|error}`
+- `ping`
+
+### Server -> Client
+- `auth_ok` / `auth_error`
+- `command`: `{kind, command_id, type, payload, request_id, sent_at}`
+- `pong`
+
+### Operator -> Server
+- `auth`: `{kind, token}`
+- `list_clients`
+- `connect_status`: `{kind, instance_id, client_id}`
+- `send_command`: `{kind, instance_id, client_id, type, payload, timeout_s, request_id}`
+- `ping`
+
+### Server -> Operator
+- `auth_ok` / `auth_error`
+- `clients`
+- `connect_status`
+- `command_result`
+- `pong`
+
+## Auth Modes
+
+Set `BRIDGE_AUTH_MODE`:
+
+- `static` (default): compare token against `BRIDGE_SHARED_TOKEN` (for clients) and `BRIDGE_OPERATOR_TOKEN` (for operator; defaults to shared token).
+- `jwt`: validate JWT with `BRIDGE_JWT_SECRET`/`BRIDGE_JWT_ALG`.
+  - Client JWT should include matching `instance_id` and `client_id` claims.
+  - Operator JWT should include `role=operator`.
+
+### Production safety
+
+- `BRIDGE_ENV=production` enforces strong auth config:
+  - static mode: `BRIDGE_SHARED_TOKEN` must not be empty/dev default.
+  - jwt mode: `BRIDGE_JWT_SECRET` must not be default.
+
+## Install (pipx recommended)
 
 ```bash
 python3 -m pip install --user pipx
@@ -22,98 +69,88 @@ python3 -m pipx ensurepath
 pipx install browser-agent-bridge
 ```
 
-Verify:
-
-```bash
-browser-bridge --version
-browser-bridge-server --help
-```
-
-Upgrade:
-
-```bash
-pipx upgrade browser-agent-bridge
-```
-
-## Install From Source
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
 ## Quick Start
 
-### 1) Start server
+### 1) (Optional) Generate local JWT secret file
 
 ```bash
+browser-bridge setup-secret
+```
+
+If `BRIDGE_AUTH_MODE=jwt` and `BRIDGE_JWT_SECRET` is still default, server startup auto-loads/creates local secret file (`~/.browser_bridge/jwt_secret` or `BRIDGE_JWT_SECRET_FILE`).
+
+### 2) Start server
+
+```bash
+# static mode example
+export BRIDGE_AUTH_MODE=static
+export BRIDGE_SHARED_TOKEN='change-me-strong-token'
+export BRIDGE_OPERATOR_TOKEN='change-me-strong-operator-token'
 browser-bridge-server
 ```
 
-Server defaults to `http://127.0.0.1:8765`.
+### 3) Load extension
 
-### 2) Create session
+1. Open `chrome://extensions`
+2. Enable Developer mode
+3. Load unpacked `extension/`
+4. In popup fill:
+   - `Bridge Server WS URL`: `ws://127.0.0.1:8765/ws/client` (or `wss://.../ws/client`)
+   - `Instance ID`: e.g. `local-instance`
+   - `Client ID`: e.g. `chrome-main`
+   - `Auth Token / JWT`: client token
+5. Save + Connect
 
-```bash
-browser-bridge create-session --name local
-```
-
-Example output:
-
-```json
-{
-  "agent_token": "...",
-  "agent_token_expires_at": "...",
-  "extension_token": "...",
-  "extension_token_expires_at": "...",
-  "saved_as": "local",
-  "session_id": "...",
-  "ws_url": "ws://127.0.0.1:8765/ws/extension/...?..."
-}
-```
-
-### 3) Load extension (unpacked)
-
-1. Open `chrome://extensions`.
-2. Enable `Developer mode`.
-3. Click `Load unpacked`.
-4. Select the `extension/` folder from this repository.
-5. Open extension popup and fill:
-   - `Bridge Server Base URL`: `http://127.0.0.1:8765`
-   - `Session ID`: the `session_id` from CLI
-   - `Extension Token`: the `extension_token` from CLI
-6. Click `Save`, then `Connect`.
-
-### 4) Verify roundtrip
+### 4) Operator CLI usage
 
 ```bash
-browser-bridge status --name local
-browser-bridge observe --name local
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' list-clients
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' connect-status --instance-id local-instance --client-id chrome-main
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' ping-tab --instance-id local-instance --client-id chrome-main
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' observe --instance-id local-instance --client-id chrome-main
 ```
 
-Optional raw command examples:
+Raw command:
 
 ```bash
-browser-bridge command --name local --type get_html --payload '{"max_chars":50000}'
-browser-bridge command --name local --type click --payload '{"selector":"button"}'
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type get_html --payload '{"max_chars":40000}'
 ```
 
-## Server Configuration
+## Security Hardening
 
-Environment variables:
+- Use TLS in non-local deployments (`wss://`).
+- Use strong static tokens or JWT secret.
+- Optional command allowlist: `BRIDGE_COMMAND_ALLOWLIST=observe,ping_tab,get_html`.
+- Optional allowed clients allowlist in static mode: `BRIDGE_ALLOWED_CLIENTS=instance1:client1,instance2:client2`.
+- Request idempotency/replay guard is enforced by `request_id` dedup window.
+- Max payload limit is enforced by `BRIDGE_MAX_MESSAGE_BYTES`.
 
-- `BRIDGE_JWT_SECRET` (required for non-dev usage)
-- `BRIDGE_AGENT_TOKEN_TTL_S` (default: `3600`)
-- `BRIDGE_EXTENSION_TOKEN_TTL_S` (default: `86400`)
-- `BRIDGE_ALLOWED_ORIGIN_PREFIXES` (comma-separated origin prefixes)
+## Deprecated HTTP Endpoints
 
-## Security Notes
+Old session-based HTTP endpoints are deprecated and disabled by default:
+- `POST /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `POST /api/sessions/{session_id}/command`
 
-- Prototype is development-oriented.
-- Tokens are sensitive. Do not share them.
-- For non-local deployments, use `https://` and `wss://`.
-- Set a strong `BRIDGE_JWT_SECRET` for any non-local usage.
+Behavior:
+- default (`BRIDGE_ENABLE_HTTP_COMPAT=0`): returns `410 Gone` with migration hint.
+- compatibility flag on: currently returns `501` stub in this build.
+
+## Migration from HTTP Session Model
+
+Old flow:
+- create session over HTTP
+- paste `session_id` + token into extension
+- send commands over HTTP per session
+
+New flow:
+- extension directly authenticates to `/ws/client` with `instance_id` + `client_id` + token/JWT
+- operator authenticates to `/ws/operator`
+- commands routed over WS by `(instance_id, client_id)`
+
+No session creation API is required.
 
 ## Testing
 
@@ -121,41 +158,7 @@ Environment variables:
 pytest -v
 ```
 
-## Build
-
-```bash
-python -m build
-python -m twine check dist/*
-```
-
-## CI and Publishing
-
-GitHub Actions workflows:
-
-- `.github/workflows/ci.yml`: tests + package checks
-- `.github/workflows/publish.yml`: publishes to PyPI on tag push (`v*`)
-
-### PyPI trusted publishing setup
-
-1. Create project `browser-agent-bridge` on PyPI.
-2. Add Trusted Publisher in PyPI settings:
-   - Owner: your GitHub org/user
-   - Repository: this repository
-   - Workflow: `publish.yml`
-   - Environment: `pypi`
-3. In GitHub settings, create environment `pypi` (optional protection rules).
-
-### Release
-
-```bash
-pytest -v
-python -m build
-python -m twine check dist/*
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Tag push triggers the publish workflow.
+Coverage includes WS auth success/failure, command routing, disconnect handling, wrong target routing, CLI failure paths, and reconnect replacement behavior.
 
 ## License
 
