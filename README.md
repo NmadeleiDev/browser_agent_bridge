@@ -112,6 +112,10 @@ browser-bridge-server
    - `Auth Token / JWT`: client token
 5. Save + Connect
 
+Connected tab preview:
+
+![Connected tab preview](docs/images/connected-tab-preview.png)
+
 ### 4) Operator CLI usage
 
 ```bash
