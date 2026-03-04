@@ -114,7 +114,7 @@ browser-bridge-server
 
 Connected tab preview:
 
-![Connected tab preview](docs/images/connected-tab-preview.svg)
+![Connected tab preview](docs/images/tab-preview.png)
 
 ### 4) Operator CLI usage
 
