@@ -45,3 +45,10 @@
 - [x] Add/replace tests for WS auth, routing, disconnect handling, wrong-target errors, CLI failure paths, reconnect.
 - [x] Rewrite README with WS-only architecture, migration notes, threat model, and prod config.
 - [x] Run full test suite and finalize migration notes.
+
+# Operator Token Hardening
+
+- [x] Enforce `BRIDGE_OPERATOR_TOKEN` complexity policy at server startup (min length + mixed character classes).
+- [x] Add tests for weak/strong operator token validation behavior.
+- [x] Update README security notes for operator token complexity requirements.
+- [x] Run tests and mark checklist complete.

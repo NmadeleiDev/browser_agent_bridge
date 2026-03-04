@@ -61,6 +61,7 @@ The extension connects outbound to server. Operator sends commands through serve
 Set `BRIDGE_AUTH_MODE`:
 
 - `static` (default): compare token against `BRIDGE_SHARED_TOKEN` (for clients) and `BRIDGE_OPERATOR_TOKEN` (for operator; defaults to shared token).
+  - `BRIDGE_OPERATOR_TOKEN` must be at least 16 chars and include lowercase, uppercase, digit, and symbol.
 - `jwt`: validate JWT with `BRIDGE_JWT_SECRET`/`BRIDGE_JWT_ALG`.
   - Client JWT should include matching `instance_id` and `client_id` claims.
   - Operator JWT should include `role=operator`.
@@ -95,7 +96,7 @@ If `BRIDGE_AUTH_MODE=jwt` and `BRIDGE_JWT_SECRET` is still default, server start
 # static mode example
 export BRIDGE_AUTH_MODE=static
 export BRIDGE_SHARED_TOKEN='change-me-strong-token'
-export BRIDGE_OPERATOR_TOKEN='change-me-strong-operator-token'
+export BRIDGE_OPERATOR_TOKEN='Str0ng!Operator#42'
 browser-bridge-server
 ```
 
@@ -114,10 +115,10 @@ browser-bridge-server
 ### 4) Operator CLI usage
 
 ```bash
-browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' list-clients
-browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' connect-status --instance-id local-instance --client-id chrome-main
-browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' ping-tab --instance-id local-instance --client-id chrome-main
-browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'change-me-strong-operator-token' observe --instance-id local-instance --client-id chrome-main
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' list-clients
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' connect-status --instance-id local-instance --client-id chrome-main
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' ping-tab --instance-id local-instance --client-id chrome-main
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' observe --instance-id local-instance --client-id chrome-main
 ```
 
 Raw command:
@@ -131,7 +132,7 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
 ## Security Hardening
 
 - Use TLS in non-local deployments (`wss://`).
-- Use strong static tokens or JWT secret.
+- Use strong static tokens or JWT secret. Operator static token must include mixed-case letters, digits, symbols, and be 16+ chars.
 - Optional command allowlist: `BRIDGE_COMMAND_ALLOWLIST=observe,ping_tab,get_html`.
 - Optional allowed clients allowlist in static mode: `BRIDGE_ALLOWED_CLIENTS=instance1:client1,instance2:client2`.
 - Request idempotency/replay guard is enforced by `request_id` dedup window.

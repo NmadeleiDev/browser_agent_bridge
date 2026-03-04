@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "browser-agent-bridge"
-version = "0.2.0"
+version = "0.2.1"
 description = "Browser Bridge server and CLI for controlling a Chrome extension over WebSocket"
 readme = "README.md"
 license = "MIT"

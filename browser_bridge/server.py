@@ -28,6 +28,7 @@ MAX_MESSAGE_BYTES = int(os.getenv("BRIDGE_MAX_MESSAGE_BYTES", "1000000"))
 AUTH_TIMEOUT_S = float(os.getenv("BRIDGE_AUTH_TIMEOUT_S", "10"))
 DEFAULT_COMMAND_TIMEOUT_S = float(os.getenv("BRIDGE_DEFAULT_COMMAND_TIMEOUT_S", "20"))
 MAX_COMMAND_TIMEOUT_S = float(os.getenv("BRIDGE_MAX_COMMAND_TIMEOUT_S", "120"))
+MIN_OPERATOR_TOKEN_LENGTH = 16
 
 _COMMAND_ALLOWLIST_RAW = os.getenv("BRIDGE_COMMAND_ALLOWLIST", "").strip()
 COMMAND_ALLOWLIST = {v.strip() for v in _COMMAND_ALLOWLIST_RAW.split(",") if v.strip()}
@@ -49,9 +50,24 @@ class AuthedClient:
     client_id: str
 
 
+def _is_strong_operator_token(token: str) -> bool:
+    if len(token) < MIN_OPERATOR_TOKEN_LENGTH:
+        return False
+    has_lower = any(ch.islower() for ch in token)
+    has_upper = any(ch.isupper() for ch in token)
+    has_digit = any(ch.isdigit() for ch in token)
+    has_symbol = any(not ch.isalnum() for ch in token)
+    return has_lower and has_upper and has_digit and has_symbol
+
+
 def _validate_startup_security() -> None:
     if AUTH_MODE not in {"static", "jwt"}:
         raise RuntimeError("BRIDGE_AUTH_MODE must be one of: static, jwt")
+
+    if AUTH_MODE == "static" and not _is_strong_operator_token(OPERATOR_TOKEN):
+        raise RuntimeError(
+            "BRIDGE_OPERATOR_TOKEN must be at least 16 chars and include upper/lowercase letters, digits, and symbols"
+        )
 
     if APP_ENV == "production":
         if AUTH_MODE == "static" and SHARED_TOKEN in {"", "dev-bridge-token"}:
