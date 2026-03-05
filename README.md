@@ -133,6 +133,12 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
   --type get_html --payload '{"max_chars":40000}'
 ```
 
+`get_html` result includes:
+- `html`: captured DOM text (possibly truncated)
+- `truncated`: whether output was cut to `payload.max_chars`
+- `notes`: actionable recommendations (for example, increase `max_chars` when truncated, or set `preprocess=false` for rawer DOM)
+- `preprocess` and `removed_nodes`: preprocessing mode and removed-node count
+
 Adaptive load wait (`navigate`, `click`, `type`):
 
 - Extension now waits for tab load completion before replying, but only up to 10s (adaptive: returns immediately if tab is already `complete`).

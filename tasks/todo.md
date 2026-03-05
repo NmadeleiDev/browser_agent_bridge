@@ -96,3 +96,9 @@
 - [x] Keep compatibility for existing workflows (same `type` command shape still works).
 - [x] Update README command docs with new `type` payload options.
 - [x] Run regression checks (`pytest -v` + JS syntax check) and mark checklist complete.
+
+# get_html Notes Field
+
+- [x] Add `notes` recommendations to `get_html` command output in extension content script.
+- [x] Update `README.md` command docs to describe the new `notes` field.
+- [x] Run regression checks (`pytest -v` + JS syntax check) and mark checklist complete.

@@ -440,6 +440,7 @@ function preprocessHtmlDom() {
 async function getHtml(payload) {
   const maxChars = Number(payload?.max_chars || 150000);
   const preprocess = payload?.preprocess !== false;
+  const notes = [];
 
   let html;
   let removedNodes = 0;
@@ -451,13 +452,26 @@ async function getHtml(payload) {
   } else {
     html = document.documentElement.outerHTML;
   }
+  const truncated = html.length > maxChars;
+
+  if (truncated) {
+    notes.push(
+      `HTML was truncated to ${maxChars} characters. Re-run get_html with a higher payload.max_chars to capture more content.`
+    );
+  }
+  if (preprocess) {
+    notes.push("Preprocessing is enabled. For rawer DOM output, re-run get_html with payload.preprocess=false.");
+  } else {
+    notes.push("Raw DOM mode is enabled (preprocess=false). Output may include scripts/styles and inline handlers.");
+  }
 
   return {
     url: window.location.href,
     title: document.title,
     preprocess,
     removed_nodes: removedNodes,
-    truncated: html.length > maxChars,
+    truncated,
+    notes,
     html: html.slice(0, maxChars)
   };
 }
