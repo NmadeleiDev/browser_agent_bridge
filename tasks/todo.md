@@ -88,3 +88,11 @@
 - [x] Document server spin-up flow (auth env vars + startup command).
 - [x] Document extension connection steps and required popup values.
 - [x] Document CLI command usage (status/list/observe/ping/send-command with examples).
+
+# Human-like Typing in Extension
+
+- [x] Define `type` command behavior for human-like input (event sequence, delays, clear-vs-append policy).
+- [x] Implement character-by-character typing in `extension/content.js` with safe defaults and payload overrides.
+- [x] Keep compatibility for existing workflows (same `type` command shape still works).
+- [x] Update README command docs with new `type` payload options.
+- [x] Run regression checks (`pytest -v` + JS syntax check) and mark checklist complete.

@@ -14,6 +14,11 @@ const INTERACTIVE_SELECTORS = [
   "[contenteditable='true']"
 ].join(",");
 
+const DEFAULT_KEYSTROKE_DELAY_MS = 45;
+const DEFAULT_KEYSTROKE_JITTER_MS = 30;
+const MAX_KEYSTROKE_DELAY_MS = 1000;
+const MAX_KEYSTROKE_JITTER_MS = 500;
+
 function isVisible(el) {
   const style = window.getComputedStyle(el);
   const rect = el.getBoundingClientRect();
@@ -217,25 +222,185 @@ async function clickSelector(payload) {
   return { clicked: true, selector: resolved.selector, resolved_by: resolved.resolvedBy };
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(num)));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTypingConfig(payload) {
+  return {
+    humanLike: payload?.human_like !== false,
+    clearFirst: payload?.clear_first !== false,
+    delayMs: boundedNumber(payload?.keystroke_delay_ms, DEFAULT_KEYSTROKE_DELAY_MS, 0, MAX_KEYSTROKE_DELAY_MS),
+    jitterMs: boundedNumber(payload?.keystroke_jitter_ms, DEFAULT_KEYSTROKE_JITTER_MS, 0, MAX_KEYSTROKE_JITTER_MS)
+  };
+}
+
+function isValueInput(el) {
+  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+}
+
+function isEditable(el) {
+  return isValueInput(el) || el.isContentEditable;
+}
+
+function dispatchKeyEvent(el, type, key) {
+  el.dispatchEvent(
+    new KeyboardEvent(type, {
+      key,
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    })
+  );
+}
+
+function dispatchInput(el, data, inputType = "insertText") {
+  try {
+    el.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        cancelable: false,
+        composed: true,
+        data,
+        inputType
+      })
+    );
+  } catch {
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
+function insertIntoValueElement(el, text, clearFirst) {
+  const start = Number.isInteger(el.selectionStart) ? el.selectionStart : el.value.length;
+  const end = Number.isInteger(el.selectionEnd) ? el.selectionEnd : start;
+  if (clearFirst) {
+    if (typeof el.setRangeText === "function") {
+      el.setRangeText(text, 0, el.value.length, "end");
+      return;
+    }
+    el.value = text;
+    return;
+  }
+  if (typeof el.setRangeText === "function") {
+    el.setRangeText(text, start, end, "end");
+    return;
+  }
+  el.value = `${el.value.slice(0, start)}${text}${el.value.slice(end)}`;
+}
+
+function placeCaretAtEnd(el) {
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertIntoContentEditable(el, text, clearFirst) {
+  if (clearFirst) {
+    el.textContent = "";
+    placeCaretAtEnd(el);
+  }
+
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  if (!selection.rangeCount) {
+    placeCaretAtEnd(el);
+  }
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.setEndAfter(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+async function typeHumanLike(el, text, config) {
+  if (isValueInput(el)) {
+    if (config.clearFirst) {
+      insertIntoValueElement(el, "", true);
+      dispatchInput(el, "", "deleteContentBackward");
+    }
+    for (const ch of text) {
+      dispatchKeyEvent(el, "keydown", ch);
+      dispatchKeyEvent(el, "keypress", ch);
+      insertIntoValueElement(el, ch, false);
+      dispatchInput(el, ch, "insertText");
+      dispatchKeyEvent(el, "keyup", ch);
+      const randomJitter = config.jitterMs > 0 ? Math.floor(Math.random() * (config.jitterMs + 1)) : 0;
+      await sleep(config.delayMs + randomJitter);
+    }
+    return;
+  }
+
+  if (el.isContentEditable) {
+    if (config.clearFirst) {
+      insertIntoContentEditable(el, "", true);
+      dispatchInput(el, "", "deleteContentBackward");
+    } else {
+      placeCaretAtEnd(el);
+    }
+    for (const ch of text) {
+      dispatchKeyEvent(el, "keydown", ch);
+      dispatchKeyEvent(el, "keypress", ch);
+      insertIntoContentEditable(el, ch, false);
+      dispatchInput(el, ch, "insertText");
+      dispatchKeyEvent(el, "keyup", ch);
+      const randomJitter = config.jitterMs > 0 ? Math.floor(Math.random() * (config.jitterMs + 1)) : 0;
+      await sleep(config.delayMs + randomJitter);
+    }
+  }
+}
+
 async function typeSelector(payload) {
   const text = String(payload?.text ?? "");
   const resolved = resolveElement(payload);
   const el = resolved.element;
+  const config = parseTypingConfig(payload);
+  const startedAt = Date.now();
+
+  if (!isEditable(el)) {
+    throw new Error("target element is not text-editable");
+  }
 
   el.focus();
-  if ("value" in el) {
-    el.value = text;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+  if (config.humanLike) {
+    await typeHumanLike(el, text, config);
+  } else if (isValueInput(el)) {
+    insertIntoValueElement(el, text, config.clearFirst);
+    dispatchInput(el, text, "insertText");
   } else {
-    document.execCommand("insertText", false, text);
+    insertIntoContentEditable(el, text, config.clearFirst);
+    dispatchInput(el, text, "insertText");
   }
+  el.dispatchEvent(new Event("change", { bubbles: true }));
 
   return {
     typed: true,
     selector: resolved.selector,
     resolved_by: resolved.resolvedBy,
-    length: text.length
+    length: text.length,
+    human_like_used: config.humanLike,
+    clear_first: config.clearFirst,
+    keystroke_delay_ms: config.delayMs,
+    keystroke_jitter_ms: config.jitterMs,
+    elapsed_ms: Date.now() - startedAt
   };
 }
 

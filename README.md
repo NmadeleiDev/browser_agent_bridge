@@ -149,6 +149,23 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
   --type navigate --payload '{"url":"https://example.com","wait_for_load_ms":4000}'
 ```
 
+Human-like typing (`type`):
+
+- `type` now simulates typing character-by-character by default to better match human input behavior.
+- Optional payload fields:
+  - `human_like` (default `true`)
+  - `clear_first` (default `true`)
+  - `keystroke_delay_ms` (default `45`)
+  - `keystroke_jitter_ms` (default `30`)
+
+Example:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type type --payload '{"selector":"input[name=\"q\"]","text":"hello world","keystroke_delay_ms":70,"keystroke_jitter_ms":45}'
+```
+
 ## Security Hardening
 
 - Use TLS in non-local deployments (`wss://`).
