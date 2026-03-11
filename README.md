@@ -125,12 +125,35 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!O
 browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' observe --instance-id local-instance --client-id chrome-main
 ```
 
+`observe` now returns stable references per node:
+- `ref`: stable element reference for follow-up actions
+- `click_ref`: reference biased toward a clickable ancestor (row/link/button)
+- `clickable_selector`: selector for the chosen clickable ancestor
+
+You can pass these back to `click` via `send-command` payload using `ref`/`click_ref` and optional guardrails:
+- `prefer`: `control` (default), `row`, or `link`
+- `avoid_roles`: e.g. `["checkbox", "menuitem"]`
+- `avoid_tags`: e.g. `["input"]`
+- `avoid_input_types`: e.g. `["checkbox", "radio"]`
+
 Raw command:
 
 ```bash
 browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
   send-command --instance-id local-instance --client-id chrome-main \
   --type get_html --payload '{"max_chars":40000}'
+```
+
+You can also avoid shell JSON escaping with `--payload-file`:
+
+```bash
+cat > /tmp/cmd.json <<'JSON'
+{"selector":"input[name=\"q\"]","text":"openclaw"}
+JSON
+
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type type --payload-file /tmp/cmd.json
 ```
 
 `get_html` result includes:

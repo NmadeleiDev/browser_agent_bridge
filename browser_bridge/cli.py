@@ -129,16 +129,39 @@ def connect_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def send_command(args: argparse.Namespace) -> int:
+def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload_text = args.payload or "{}"
+    payload_file = str(getattr(args, "payload_file", "") or "").strip()
+
+    if payload_file:
+        if payload_text and payload_text != "{}":
+            raise CliError("Use either --payload or --payload-file, not both.")
+        try:
+            with open(payload_file, "r", encoding="utf-8") as fh:
+                payload_text = fh.read()
+        except OSError as exc:
+            raise CliError(
+                f"Cannot read payload file: {payload_file}",
+                hint="Check file path and permissions.",
+            ) from exc
+
     try:
-        payload = json.loads(args.payload or "{}")
+        payload = json.loads(payload_text or "{}")
     except json.JSONDecodeError as exc:
+        location = f" line {exc.lineno} column {exc.colno}" if exc.lineno and exc.colno else ""
+        source_hint = f"payload file `{payload_file}`" if payload_file else "--payload"
         raise CliError(
-            f"Invalid JSON for --payload: {exc.msg}",
-            hint='Pass valid JSON, e.g. --payload \'{"url":"https://example.com"}\'.',
+            f"Invalid JSON in {source_hint}:{location} {exc.msg}",
+            hint='Pass valid JSON, e.g. --payload \'{"url":"https://example.com"}\' or use --payload-file request.json.',
         ) from exc
+
     if not isinstance(payload, dict):
-        raise CliError("Invalid --payload type", hint="Payload must be a JSON object.")
+        raise CliError("Invalid payload type", hint="Payload must be a JSON object.")
+    return payload
+
+
+def send_command(args: argparse.Namespace) -> int:
+    payload = _load_payload(args)
 
     request_id = args.request_id or uuid.uuid4().hex
     wire = {
@@ -243,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_cmd.add_argument("--client-id", required=True)
     send_cmd.add_argument("--type", dest="command_type", required=True)
     send_cmd.add_argument("--payload", default="{}", help="JSON payload string")
+    send_cmd.add_argument("--payload-file", default="", help="Path to JSON payload file")
     send_cmd.add_argument("--timeout-s", type=float, default=20.0)
     send_cmd.add_argument("--request-id", default="", help="Optional idempotency key; auto-generated if omitted")
     send_cmd.set_defaults(func=send_command)

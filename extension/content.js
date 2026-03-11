@@ -18,6 +18,8 @@ const DEFAULT_KEYSTROKE_DELAY_MS = 45;
 const DEFAULT_KEYSTROKE_JITTER_MS = 30;
 const MAX_KEYSTROKE_DELAY_MS = 1000;
 const MAX_KEYSTROKE_JITTER_MS = 500;
+const BRIDGE_REF_ATTR = "data-browser-bridge-ref";
+let lastObserveRefMap = new Map();
 
 function isVisible(el) {
   const style = window.getComputedStyle(el);
@@ -31,6 +33,77 @@ function toText(value) {
 
 function cssAttr(name, value) {
   return `[${name}="${CSS.escape(String(value))}"]`;
+}
+
+function tinyHash(input) {
+  let hash = 2166136261;
+  const str = String(input || "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function makeElementRef(el) {
+  const locator = elementLocator(el);
+  const key = [
+    locator.tag,
+    locator.role || "",
+    locator.name || "",
+    locator.aria_label || "",
+    locator.placeholder || "",
+    locator.data_testid || "",
+    locator.id || "",
+    locator.text || ""
+  ].join("|");
+  return `ref_${tinyHash(`${nthOfTypeSelector(el)}|${key}`)}`;
+}
+
+function isRowLikeElement(el) {
+  if (!el) {
+    return false;
+  }
+  const role = toText(el.getAttribute("role")).toLowerCase();
+  const tag = el.tagName.toLowerCase();
+  if (role === "row" || role === "option" || role === "listitem") {
+    return true;
+  }
+  if (tag === "li" || tag === "tr") {
+    return true;
+  }
+  const classes = toText(el.className).toLowerCase();
+  return /row|item|conversation|list/.test(classes);
+}
+
+function closestClickable(el) {
+  if (!el) {
+    return null;
+  }
+  return el.closest("a[href], button, [role='button'], [role='option'], [role='menuitem'], [tabindex]");
+}
+
+function pickClickTarget(el, prefer = "control") {
+  const clickable = closestClickable(el);
+  if (!clickable) {
+    return el;
+  }
+  if (prefer === "row") {
+    let node = clickable;
+    while (node && node !== document.body) {
+      if (isRowLikeElement(node)) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+  }
+  if (prefer === "link") {
+    const link = clickable.closest("a[href]");
+    if (link) {
+      return link;
+    }
+  }
+  return clickable;
 }
 
 function isUniqueSelector(selector) {
@@ -116,24 +189,41 @@ function elementLocator(el) {
 
 function observe(payload) {
   const maxNodes = Number(payload?.max_nodes || 150);
+  const prefer = toText(payload?.prefer).toLowerCase() || "control";
   const candidates = Array.from(document.querySelectorAll(INTERACTIVE_SELECTORS));
   const nodes = [];
+  const refMap = new Map();
+
   for (const el of candidates) {
     if (!isVisible(el)) {
       continue;
     }
     const rect = el.getBoundingClientRect();
     const selectorInfo = bestSelector(el);
+    const ref = makeElementRef(el);
+    const clickTarget = pickClickTarget(el, prefer);
+    const clickSelectorInfo = bestSelector(clickTarget);
+    const clickRef = makeElementRef(clickTarget);
+
+    refMap.set(ref, selectorInfo.selector);
+    refMap.set(clickRef, clickSelectorInfo.selector);
+
     nodes.push({
+      ref,
+      click_ref: clickRef,
       locator: elementLocator(el),
       selector: selectorInfo.selector,
+      clickable_selector: clickSelectorInfo.selector,
       selector_candidates: selectorInfo.candidates.slice(0, 6),
+      clickable_selector_candidates: clickSelectorInfo.candidates.slice(0, 6),
       bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
     });
     if (nodes.length >= maxNodes) {
       break;
     }
   }
+
+  lastObserveRefMap = refMap;
 
   return {
     url: window.location.href,
@@ -195,11 +285,72 @@ function resolveByLocator(locator) {
   return matches[Math.max(0, Math.min(desiredIndex, matches.length - 1))];
 }
 
+function resolveByRef(ref) {
+  const key = toText(ref);
+  if (!key || !(lastObserveRefMap instanceof Map)) {
+    return null;
+  }
+  const selector = lastObserveRefMap.get(key);
+  if (!selector) {
+    return null;
+  }
+  const element = document.querySelector(selector);
+  if (!element) {
+    return null;
+  }
+  return { element, selector };
+}
+
+function shouldAvoidElement(el, payload) {
+  const avoidRoles = Array.isArray(payload?.avoid_roles) ? payload.avoid_roles.map((v) => toText(v).toLowerCase()) : [];
+  const avoidTags = Array.isArray(payload?.avoid_tags) ? payload.avoid_tags.map((v) => toText(v).toLowerCase()) : [];
+  const avoidInputTypes = Array.isArray(payload?.avoid_input_types)
+    ? payload.avoid_input_types.map((v) => toText(v).toLowerCase())
+    : [];
+
+  const role = toText(el.getAttribute("role")).toLowerCase();
+  const tag = el.tagName.toLowerCase();
+  const inputType = tag === "input" ? toText(el.getAttribute("type")).toLowerCase() : "";
+
+  if (avoidRoles.includes(role)) {
+    return true;
+  }
+  if (avoidTags.includes(tag)) {
+    return true;
+  }
+  if (inputType && avoidInputTypes.includes(inputType)) {
+    return true;
+  }
+  return false;
+}
+
 function resolveElement(payload) {
+  const prefer = toText(payload?.prefer).toLowerCase() || "control";
+
+  const clickableRef = toText(payload?.click_ref);
+  if (clickableRef) {
+    const resolvedRef = resolveByRef(clickableRef);
+    if (resolvedRef && !shouldAvoidElement(resolvedRef.element, payload)) {
+      return { element: resolvedRef.element, resolvedBy: "click_ref", selector: resolvedRef.selector };
+    }
+  }
+
+  const ref = toText(payload?.ref);
+  if (ref) {
+    const resolvedRef = resolveByRef(ref);
+    if (resolvedRef) {
+      const preferred = pickClickTarget(resolvedRef.element, prefer);
+      if (!shouldAvoidElement(preferred, payload)) {
+        const selectorInfo = bestSelector(preferred);
+        return { element: preferred, resolvedBy: "ref", selector: selectorInfo.selector };
+      }
+    }
+  }
+
   const selector = toText(payload?.selector);
   if (selector) {
     const selected = document.querySelector(selector);
-    if (selected) {
+    if (selected && !shouldAvoidElement(selected, payload)) {
       return { element: selected, resolvedBy: "selector", selector };
     }
   }
@@ -208,12 +359,15 @@ function resolveElement(payload) {
   if (locator && typeof locator === "object") {
     const located = resolveByLocator(locator);
     if (located) {
-      const selectorInfo = bestSelector(located);
-      return { element: located, resolvedBy: "locator", selector: selectorInfo.selector };
+      const preferred = pickClickTarget(located, prefer);
+      if (!shouldAvoidElement(preferred, payload)) {
+        const selectorInfo = bestSelector(preferred);
+        return { element: preferred, resolvedBy: "locator", selector: selectorInfo.selector };
+      }
     }
   }
 
-  throw new Error("element not found (selector and locator failed)");
+  throw new Error("element not found (selector, ref, click_ref, and locator failed)");
 }
 
 async function clickSelector(payload) {
