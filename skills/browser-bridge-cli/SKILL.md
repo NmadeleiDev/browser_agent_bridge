@@ -1,13 +1,13 @@
 ---
 name: browser-bridge-cli
-description: Use this skill when an agent needs to control a user's browser through the Browser Bridge Python CLI from https://github.com/NmadeleiDev/browser_agent_bridge, including setup, server startup, extension connection, and command execution.
+description: Use this skill when you need to control or make actions on the user's chrome tab.
 ---
 
 # Browser Bridge CLI
 
 ## When to use
 
-Use this skill when you need to control a real Chrome tab through a user-side extension and a Python CLI bridge. Typical situations:
+Use this skill when you need to control a real Chrome tab. Typical situations:
 - browser automation with live user browser context
 - page observation (interactive elements and DOM snapshots)
 - remote tab actions (navigate, click, type, scroll)
@@ -72,8 +72,11 @@ Use static auth for straightforward local setup:
 export BRIDGE_AUTH_MODE=static
 export BRIDGE_SHARED_TOKEN='change-me-strong-token'
 export BRIDGE_OPERATOR_TOKEN='Str0ng!Operator#42'
-browser-bridge-server
+browser-bridge-server >/tmp/browser-bridge-server.log 2>&1 &
+echo $! >/tmp/browser-bridge-server.pid
 ```
+
+Start `browser-bridge-server` in the background. Do not leave it attached to the current shell, because the agent needs that shell for follow-up CLI commands, status checks, and diagnostics. If startup needs verification, inspect the log file or process state after backgrounding it.
 
 Default endpoints:
 - Extension client WS: `ws://127.0.0.1:8765/ws/client`

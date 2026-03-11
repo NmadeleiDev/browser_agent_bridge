@@ -102,3 +102,8 @@
 - [x] Add `notes` recommendations to `get_html` command output in extension content script.
 - [x] Update `README.md` command docs to describe the new `notes` field.
 - [x] Run regression checks (`pytest -v` + JS syntax check) and mark checklist complete.
+
+# Browser Bridge CLI Skill Background Server Guidance
+
+- [x] Update `skills/browser-bridge-cli/SKILL.md` to tell agents to start `browser-bridge-server` in the background so the shell stays available for CLI commands.
+- [x] Verify the skill examples and surrounding guidance reflect the background-start requirement.
