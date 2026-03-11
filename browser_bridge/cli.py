@@ -149,9 +149,12 @@ def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
         payload = json.loads(payload_text or "{}")
     except json.JSONDecodeError as exc:
         location = f" line {exc.lineno} column {exc.colno}" if exc.lineno and exc.colno else ""
-        source_hint = f"payload file `{payload_file}`" if payload_file else "--payload"
+        if payload_file:
+            message = f"Invalid JSON in payload file `{payload_file}`:{location} {exc.msg}"
+        else:
+            message = f"Invalid JSON for --payload:{location} {exc.msg}"
         raise CliError(
-            f"Invalid JSON in {source_hint}:{location} {exc.msg}",
+            message,
             hint='Pass valid JSON, e.g. --payload \'{"url":"https://example.com"}\' or use --payload-file request.json.',
         ) from exc
 
