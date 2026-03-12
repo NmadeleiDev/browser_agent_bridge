@@ -76,6 +76,60 @@ function isRowLikeElement(el) {
   return /row|item|conversation|list/.test(classes);
 }
 
+function isMessagingPage() {
+  return /linkedin\.com$/.test(window.location.hostname) && window.location.pathname.startsWith("/messaging");
+}
+
+function isMessagingConversationRow(el) {
+  if (!el || el.tagName?.toLowerCase() !== "li") {
+    return false;
+  }
+  if (!isMessagingPage() || !isVisible(el)) {
+    return false;
+  }
+
+  const hasCheckbox = Boolean(el.querySelector("input[id^='checkbox-msg-selectable-entity__checkbox-']"));
+  const hasOptionsButton = Array.from(el.querySelectorAll("button")).some((button) =>
+    toText(button.getAttribute("aria-label") || button.innerText).toLowerCase().startsWith("open the options list in your conversation")
+  );
+  const hasMeaningfulText = toText(el.innerText).length > 8;
+
+  return hasMeaningfulText && (hasCheckbox || hasOptionsButton);
+}
+
+function messagingConversationRows() {
+  if (!isMessagingPage()) {
+    return [];
+  }
+  return Array.from(document.querySelectorAll("main li")).filter(isMessagingConversationRow);
+}
+
+function messagingRowSafeTarget(row) {
+  if (!isMessagingConversationRow(row)) {
+    return null;
+  }
+  const blocked = row.querySelectorAll("input, button, [role='button'], a[href]");
+  const rect = row.getBoundingClientRect();
+  const samplePoints = [
+    { x: rect.left + Math.min(Math.max(56, rect.width * 0.38), Math.max(56, rect.width - 56)), y: rect.top + rect.height / 2 },
+    { x: rect.left + Math.min(Math.max(72, rect.width * 0.55), Math.max(72, rect.width - 72)), y: rect.top + rect.height / 2 },
+    { x: rect.left + rect.width / 2, y: rect.top + Math.min(Math.max(20, rect.height / 2), rect.height - 20) }
+  ];
+
+  for (const point of samplePoints) {
+    const node = document.elementFromPoint(point.x, point.y);
+    if (!node || !(node instanceof Element) || !row.contains(node)) {
+      continue;
+    }
+    if (Array.from(blocked).some((candidate) => candidate.contains(node) || node.contains(candidate))) {
+      continue;
+    }
+    return node;
+  }
+
+  return row;
+}
+
 function closestClickable(el) {
   if (!el) {
     return null;
@@ -84,6 +138,18 @@ function closestClickable(el) {
 }
 
 function pickClickTarget(el, prefer = "control") {
+  if (isMessagingConversationRow(el)) {
+    return el;
+  }
+  const messagingRow = isMessagingPage() ? el?.closest?.("li") : null;
+  if (isMessagingConversationRow(messagingRow)) {
+    if (prefer === "control" && !matchesAvoidableControl(el)) {
+      return messagingRowSafeTarget(messagingRow) || messagingRow;
+    }
+    if (prefer === "row") {
+      return messagingRow;
+    }
+  }
   const clickable = closestClickable(el);
   if (!clickable) {
     return el;
@@ -104,6 +170,20 @@ function pickClickTarget(el, prefer = "control") {
     }
   }
   return clickable;
+}
+
+function matchesAvoidableControl(el) {
+  if (!el) {
+    return false;
+  }
+  const tag = el.tagName.toLowerCase();
+  const role = toText(el.getAttribute("role")).toLowerCase();
+  const aria = toText(el.getAttribute("aria-label") || el.innerText).toLowerCase();
+
+  if (tag === "input" || role === "checkbox") {
+    return true;
+  }
+  return aria.startsWith("open the options list in your conversation");
 }
 
 function isUniqueSelector(selector) {
@@ -190,7 +270,7 @@ function elementLocator(el) {
 function observe(payload) {
   const maxNodes = Number(payload?.max_nodes || 150);
   const prefer = toText(payload?.prefer).toLowerCase() || "control";
-  const candidates = Array.from(document.querySelectorAll(INTERACTIVE_SELECTORS));
+  const candidates = Array.from(new Set([...document.querySelectorAll(INTERACTIVE_SELECTORS), ...messagingConversationRows()]));
   const nodes = [];
   const refMap = new Map();
 
@@ -372,8 +452,66 @@ function resolveElement(payload) {
 
 async function clickSelector(payload) {
   const resolved = resolveElement(payload);
-  resolved.element.click();
+  await performRobustClick(resolved.element);
   return { clicked: true, selector: resolved.selector, resolved_by: resolved.resolvedBy };
+}
+
+function clickPointForElement(el) {
+  if (isMessagingConversationRow(el)) {
+    const safeTarget = messagingRowSafeTarget(el);
+    if (safeTarget && safeTarget !== el) {
+      return clickPointForElement(safeTarget);
+    }
+  }
+
+  const rect = el.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2
+  };
+}
+
+function dispatchPointerSequence(target, point) {
+  const eventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clientX: point.x,
+    clientY: point.y,
+    button: 0,
+    buttons: 1,
+    pointerId: 1,
+    pointerType: "mouse",
+    isPrimary: true
+  };
+
+  const pointerCtor = window.PointerEvent || window.MouseEvent;
+  target.dispatchEvent(new pointerCtor("pointerdown", eventInit));
+  target.dispatchEvent(new MouseEvent("mousedown", eventInit));
+  target.dispatchEvent(new pointerCtor("pointerup", eventInit));
+  target.dispatchEvent(new MouseEvent("mouseup", eventInit));
+  target.dispatchEvent(new MouseEvent("click", eventInit));
+}
+
+async function performRobustClick(el) {
+  el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  await sleep(40);
+
+  if (typeof el.focus === "function") {
+    el.focus({ preventScroll: true });
+  }
+
+  const point = clickPointForElement(el);
+  let target = document.elementFromPoint(point.x, point.y);
+  if (!(target instanceof Element) || !el.contains(target)) {
+    target = el;
+  }
+
+  dispatchPointerSequence(target, point);
+
+  if (document.activeElement !== el && typeof el.click === "function") {
+    el.click();
+  }
 }
 
 function boundedNumber(value, fallback, min, max) {

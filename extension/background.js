@@ -283,8 +283,13 @@ function closeSocket() {
     reconnectTimer = null;
   }
   if (ws) {
-    ws.close();
+    const socket = ws;
     ws = null;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    socket.close();
   }
 }
 
@@ -335,11 +340,16 @@ async function connectWs(configOverride = null) {
   activeConfig = config;
   await persistRuntimeState();
 
-  ws = new WebSocket(config.wsUrl.trim());
+  const socket = new WebSocket(config.wsUrl.trim());
+  ws = socket;
 
-  ws.onopen = () => {
+  socket.onopen = () => {
+    if (ws !== socket) {
+      socket.close();
+      return;
+    }
     updateStatus("authenticating", false);
-    ws.send(JSON.stringify({
+    socket.send(JSON.stringify({
       kind: "auth",
       instance_id: config.instanceId,
       client_id: config.clientId,
@@ -347,16 +357,25 @@ async function connectWs(configOverride = null) {
     }));
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws === socket) {
+      ws = null;
+    }
     updateStatus("socket-closed", false);
     scheduleReconnect();
   };
 
-  ws.onerror = () => {
+  socket.onerror = () => {
+    if (ws !== socket) {
+      return;
+    }
     updateStatus("socket-error");
   };
 
-  ws.onmessage = async (evt) => {
+  socket.onmessage = async (evt) => {
+    if (ws !== socket) {
+      return;
+    }
     try {
       const parsed = JSON.parse(evt.data);
       const kind = parsed.kind;
@@ -371,7 +390,7 @@ async function connectWs(configOverride = null) {
         shouldReconnect = false;
         updateStatus(`auth-error:${parsed.code || "AUTH_FAILED"}`, false);
         persistRuntimeState().catch(() => {});
-        ws.close();
+        socket.close();
         return;
       }
 
@@ -390,14 +409,14 @@ async function connectWs(configOverride = null) {
 
       try {
         const result = await executeCommand(parsed);
-        ws.send(JSON.stringify({
+        socket.send(JSON.stringify({
           kind: "result",
           command_id: commandId,
           ok: true,
           result
         }));
       } catch (err) {
-        ws.send(JSON.stringify({
+        socket.send(JSON.stringify({
           kind: "result",
           command_id: commandId,
           ok: false,
