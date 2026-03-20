@@ -11,6 +11,7 @@ const DEFAULTS = {
 
 const KEEPALIVE_ALARM = "bridge-keepalive";
 const KEEPALIVE_MINUTES = 1;
+const WS_PING_INTERVAL_MS = 20000;
 const DEFAULT_POST_COMMAND_WAIT_MS = 10000;
 const MAX_POST_COMMAND_WAIT_MS = 10000;
 const LOAD_STATUS_POLL_MS = 150;
@@ -18,6 +19,7 @@ const LOAD_STATUS_POLL_MS = 150;
 let ws = null;
 let wsConnected = false;
 let reconnectTimer = null;
+let wsPingTimer = null;
 let shouldReconnect = false;
 let desiredConnected = false;
 let lastEvent = "idle";
@@ -235,7 +237,8 @@ async function executeCommand(command) {
     case "get_html":
       return sendToContent(type, payload);
     case "click":
-    case "type": {
+    case "type":
+    case "press_key": {
       const tabId = await targetTabId();
       const result = await sendToContent(type, payload, tabId);
       return {
@@ -278,6 +281,7 @@ async function executeCommand(command) {
 }
 
 function closeSocket() {
+  stopWsPing();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -291,6 +295,28 @@ function closeSocket() {
     socket.onclose = null;
     socket.close();
   }
+}
+
+function stopWsPing() {
+  if (wsPingTimer) {
+    clearInterval(wsPingTimer);
+    wsPingTimer = null;
+  }
+}
+
+function startWsPing(socket) {
+  stopWsPing();
+  wsPingTimer = setInterval(() => {
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) {
+      stopWsPing();
+      return;
+    }
+    try {
+      socket.send(JSON.stringify({ kind: "ping" }));
+    } catch {
+      stopWsPing();
+    }
+  }, WS_PING_INTERVAL_MS);
 }
 
 async function disconnectWs() {
@@ -381,6 +407,7 @@ async function connectWs(configOverride = null) {
       const kind = parsed.kind;
 
       if (kind === "auth_ok") {
+        startWsPing(socket);
         updateStatus("connected", true);
         return;
       }

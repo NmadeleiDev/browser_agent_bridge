@@ -19,12 +19,48 @@ const DEFAULT_KEYSTROKE_JITTER_MS = 30;
 const MAX_KEYSTROKE_DELAY_MS = 1000;
 const MAX_KEYSTROKE_JITTER_MS = 500;
 const BRIDGE_REF_ATTR = "data-browser-bridge-ref";
+const SPECIAL_KEYS = {
+  enter: { key: "Enter", code: "Enter", keyCode: 13, keypress: true },
+  tab: { key: "Tab", code: "Tab", keyCode: 9, keypress: false },
+  escape: { key: "Escape", code: "Escape", keyCode: 27, keypress: false },
+  backspace: { key: "Backspace", code: "Backspace", keyCode: 8, keypress: false },
+  delete: { key: "Delete", code: "Delete", keyCode: 46, keypress: false },
+  arrowup: { key: "ArrowUp", code: "ArrowUp", keyCode: 38, keypress: false },
+  arrowdown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40, keypress: false },
+  arrowleft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, keypress: false },
+  arrowright: { key: "ArrowRight", code: "ArrowRight", keyCode: 39, keypress: false },
+  home: { key: "Home", code: "Home", keyCode: 36, keypress: false },
+  end: { key: "End", code: "End", keyCode: 35, keypress: false },
+  pageup: { key: "PageUp", code: "PageUp", keyCode: 33, keypress: false },
+  pagedown: { key: "PageDown", code: "PageDown", keyCode: 34, keypress: false },
+  space: { key: " ", code: "Space", keyCode: 32, keypress: true }
+};
 let lastObserveRefMap = new Map();
 
 function isVisible(el) {
   const style = window.getComputedStyle(el);
   const rect = el.getBoundingClientRect();
   return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+}
+
+function createKeyboardEvent(type, init) {
+  const event = new KeyboardEvent(type, init);
+  for (const [name, value] of Object.entries({
+    keyCode: init.keyCode,
+    which: init.which,
+    charCode: init.charCode ?? 0
+  })) {
+    try {
+      Object.defineProperty(event, name, {
+        configurable: true,
+        enumerable: true,
+        get: () => value
+      });
+    } catch {
+      // Ignore readonly legacy fields when the browser disallows overriding them.
+    }
+  }
+  return event;
 }
 
 function toText(value) {
@@ -543,9 +579,178 @@ function isEditable(el) {
   return isValueInput(el) || el.isContentEditable;
 }
 
+function selectionRange(el) {
+  const start = Number.isInteger(el.selectionStart) ? el.selectionStart : el.value.length;
+  const end = Number.isInteger(el.selectionEnd) ? el.selectionEnd : start;
+  return { start, end };
+}
+
+function replaceSelection(el, text) {
+  const { start, end } = selectionRange(el);
+  if (typeof el.setRangeText === "function") {
+    el.setRangeText(text, start, end, "end");
+    return;
+  }
+  el.value = `${el.value.slice(0, start)}${text}${el.value.slice(end)}`;
+}
+
+function deleteFromValueElement(el, forward = false) {
+  const { start, end } = selectionRange(el);
+  let from = start;
+  let to = end;
+
+  if (start === end) {
+    if (forward) {
+      to = Math.min(el.value.length, end + 1);
+    } else {
+      from = Math.max(0, start - 1);
+    }
+  }
+
+  if (typeof el.setRangeText === "function") {
+    el.setRangeText("", from, to, "end");
+    return;
+  }
+  el.value = `${el.value.slice(0, from)}${el.value.slice(to)}`;
+}
+
+function deleteFromContentEditable(el, forward = false) {
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  if (!selection.rangeCount) {
+    placeCaretAtEnd(el);
+  }
+  if (selection.rangeCount && selection.getRangeAt(0).collapsed && typeof selection.modify === "function") {
+    selection.modify("extend", forward ? "forward" : "backward", "character");
+  }
+  document.execCommand("delete");
+}
+
+function dispatchEditableInput(el, data, inputType) {
+  dispatchInput(el, data, inputType);
+}
+
+function insertLineBreak(el) {
+  if (el instanceof HTMLTextAreaElement) {
+    replaceSelection(el, "\n");
+    dispatchEditableInput(el, "\n", "insertLineBreak");
+    return true;
+  }
+  if (el.isContentEditable) {
+    insertIntoContentEditable(el, "\n", false);
+    dispatchEditableInput(el, "\n", "insertLineBreak");
+    return true;
+  }
+  return false;
+}
+
+function deleteEditableContent(el, forward = false) {
+  if (isValueInput(el)) {
+    deleteFromValueElement(el, forward);
+    dispatchEditableInput(el, "", forward ? "deleteContentForward" : "deleteContentBackward");
+    return true;
+  }
+  if (el.isContentEditable) {
+    deleteFromContentEditable(el, forward);
+    dispatchEditableInput(el, "", forward ? "deleteContentForward" : "deleteContentBackward");
+    return true;
+  }
+  return false;
+}
+
+function focusableElements() {
+  return Array.from(
+    document.querySelectorAll(
+      [
+        "a[href]",
+        "button",
+        "input",
+        "select",
+        "textarea",
+        "[tabindex]",
+        "[contenteditable='true']"
+      ].join(",")
+    )
+  ).filter((el) => {
+    if (!isVisible(el)) {
+      return false;
+    }
+    if (el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") {
+      return false;
+    }
+    const tabIndex = Number(el.getAttribute("tabindex") ?? "0");
+    return !Number.isFinite(tabIndex) || tabIndex >= 0;
+  });
+}
+
+function moveFocusByTab(current, backwards = false) {
+  const all = focusableElements();
+  if (!all.length) {
+    return null;
+  }
+  const currentIndex = all.indexOf(current);
+  const baseIndex = currentIndex >= 0 ? currentIndex : -1;
+  const nextIndex = backwards
+    ? (baseIndex - 1 + all.length) % all.length
+    : (baseIndex + 1) % all.length;
+  const next = all[nextIndex];
+  if (typeof next.focus === "function") {
+    next.focus();
+  }
+  return next;
+}
+
+function submitElementForm(el) {
+  const form = el instanceof HTMLElement ? el.closest("form") : null;
+  if (!form) {
+    return false;
+  }
+  if (typeof form.requestSubmit === "function") {
+    form.requestSubmit();
+    return true;
+  }
+  if (typeof form.submit === "function") {
+    form.submit();
+    return true;
+  }
+  return false;
+}
+
+function normalizeSpecialKey(rawKey) {
+  const compact = toText(rawKey).toLowerCase().replace(/[\s_-]+/g, "");
+  const aliases = {
+    return: "enter",
+    esc: "escape",
+    del: "delete",
+    up: "arrowup",
+    down: "arrowdown",
+    left: "arrowleft",
+    right: "arrowright",
+    spacebar: "space"
+  };
+  const canonical = aliases[compact] || compact;
+  return SPECIAL_KEYS[canonical] || null;
+}
+
+function resolveKeyTarget(payload) {
+  const hasExplicitTarget = ["selector", "ref", "click_ref", "locator"].some((field) => field in (payload || {}));
+  if (hasExplicitTarget) {
+    return resolveElement(payload);
+  }
+  const active = document.activeElement instanceof Element ? document.activeElement : document.body;
+  const selectorInfo = bestSelector(active);
+  return {
+    element: active,
+    resolvedBy: active === document.body ? "document.activeElement" : "active_element",
+    selector: selectorInfo.selector
+  };
+}
+
 function dispatchKeyEvent(el, type, key) {
   el.dispatchEvent(
-    new KeyboardEvent(type, {
+    createKeyboardEvent(type, {
       key,
       bubbles: true,
       cancelable: true,
@@ -696,6 +901,110 @@ async function typeSelector(payload) {
   };
 }
 
+function performDefaultKeyBehavior(el, keyDef, payload) {
+  switch (keyDef.key) {
+    case "Enter":
+      if (insertLineBreak(el)) {
+        return { handled: true, effect: "insert_line_break" };
+      }
+      if (el instanceof HTMLButtonElement || (el instanceof HTMLInputElement && ["button", "submit"].includes(toText(el.type).toLowerCase()))) {
+        el.click();
+        return { handled: true, effect: "click" };
+      }
+      if (submitElementForm(el)) {
+        return { handled: true, effect: "submit_form" };
+      }
+      return { handled: false, effect: "dispatch_only" };
+    case "Tab": {
+      const next = moveFocusByTab(el, payload?.shift_key === true);
+      return { handled: Boolean(next), effect: next ? "move_focus" : "dispatch_only" };
+    }
+    case "Backspace":
+      return deleteEditableContent(el, false)
+        ? { handled: true, effect: "delete_backward" }
+        : { handled: false, effect: "dispatch_only" };
+    case "Delete":
+      return deleteEditableContent(el, true)
+        ? { handled: true, effect: "delete_forward" }
+        : { handled: false, effect: "dispatch_only" };
+    case " ":
+      if (el instanceof HTMLButtonElement || toText(el.getAttribute("role")).toLowerCase() === "button") {
+        el.click();
+        return { handled: true, effect: "click" };
+      }
+      return { handled: false, effect: "dispatch_only" };
+    default:
+      return { handled: false, effect: "dispatch_only" };
+  }
+}
+
+function dispatchSpecialKey(el, keyDef, payload) {
+  const eventInit = {
+    key: keyDef.key,
+    code: keyDef.code,
+    keyCode: keyDef.keyCode,
+    which: keyDef.keyCode,
+    charCode: keyDef.keypress ? keyDef.keyCode : 0,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    altKey: payload?.alt_key === true,
+    ctrlKey: payload?.ctrl_key === true,
+    metaKey: payload?.meta_key === true,
+    shiftKey: payload?.shift_key === true,
+    repeat: payload?.repeat === true
+  };
+
+  const keydownOk = el.dispatchEvent(createKeyboardEvent("keydown", eventInit));
+  let keypressOk = true;
+  if (keydownOk && keyDef.keypress) {
+    keypressOk = el.dispatchEvent(createKeyboardEvent("keypress", eventInit));
+  }
+
+  let defaultBehavior = { handled: false, effect: "dispatch_only" };
+  if (keydownOk && keypressOk) {
+    defaultBehavior = performDefaultKeyBehavior(el, keyDef, payload);
+  }
+
+  el.dispatchEvent(createKeyboardEvent("keyup", eventInit));
+
+  return {
+    keydown_ok: keydownOk,
+    keypress_ok: keyDef.keypress ? keypressOk : null,
+    default_handled: defaultBehavior.handled,
+    default_effect: defaultBehavior.effect
+  };
+}
+
+async function pressKey(payload) {
+  const keyDef = normalizeSpecialKey(payload?.key);
+  if (!keyDef) {
+    throw new Error(
+      "unsupported key; supported keys are Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space"
+    );
+  }
+
+  const resolved = resolveKeyTarget(payload);
+  const el = resolved.element;
+  if (!(el instanceof HTMLElement)) {
+    throw new Error("target element is not keyboard-focusable");
+  }
+
+  if (typeof el.focus === "function" && payload?.focus !== false) {
+    el.focus({ preventScroll: true });
+  }
+
+  const result = dispatchSpecialKey(el, keyDef, payload);
+
+  return {
+    pressed: true,
+    key: keyDef.key === " " ? "Space" : keyDef.key,
+    selector: resolved.selector,
+    resolved_by: resolved.resolvedBy,
+    ...result
+  };
+}
+
 async function scrollByAmount(payload) {
   const dx = Number(payload?.dx || 0);
   const dy = Number(payload?.dy || 0);
@@ -782,6 +1091,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return clickSelector(payload);
       case "type":
         return typeSelector(payload);
+      case "press_key":
+        return pressKey(payload);
       case "scroll":
         return scrollByAmount(payload);
       case "get_html":

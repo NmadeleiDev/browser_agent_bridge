@@ -10,7 +10,7 @@ description: Use this skill when you need to control or make actions on the user
 Use this skill when you need to control a real Chrome tab. Typical situations:
 - browser automation with live user browser context
 - page observation (interactive elements and DOM snapshots)
-- remote tab actions (navigate, click, type, scroll)
+- remote tab actions (navigate, click, type, press_key, scroll)
 - troubleshooting connection state between agent and browser
 
 Project:
@@ -164,6 +164,21 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!O
   --type type --payload '{"selector":"input[name=q]","text":"browser bridge"}'
 ```
 
+Press a special key:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!Operator#42' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type press_key --payload '{"key":"Enter","selector":"input[name=q]"}'
+```
+
+`press_key` supports:
+- keys: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `Space`
+- aliases: `return`, `esc`, `del`, `up`, `down`, `left`, `right`, `spacebar`
+- modifiers: `alt_key`, `ctrl_key`, `meta_key`, `shift_key`
+- target selection via `selector`, `ref`, `click_ref`, or `locator`
+- default target: current `document.activeElement` when no selector/ref is provided
+
 ## Recommended execution flow for agents
 
 1. Ensure server process is running.
@@ -172,7 +187,7 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token 'Str0ng!O
 4. Run `connect-status`.
 5. Run `ping-tab`.
 6. Run `observe` before action commands.
-7. Run `send-command` actions (`navigate`, `click`, `type`, `scroll`, `get_html`).
+7. Run `send-command` actions (`navigate`, `click`, `type`, `press_key`, `scroll`, `get_html`).
 8. Re-run `observe` to confirm page state after actions.
 
 ## Troubleshooting

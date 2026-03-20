@@ -186,3 +186,42 @@ def test_extension_reconnect_replaces_old_socket() -> None:
         result = ws_operator.receive_json()
         assert result["ok"] is True
         assert result["result"] == {"ready": True}
+
+
+def test_press_key_command_roundtrip() -> None:
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/client") as ws_client, client.websocket_connect("/ws/operator") as ws_operator:
+        _auth_client(ws_client)
+        _auth_operator(ws_operator)
+
+        ws_operator.send_json(
+            {
+                "kind": "send_command",
+                "instance_id": "inst-1",
+                "client_id": "client-1",
+                "type": "press_key",
+                "payload": {"key": "Enter", "selector": "input[name=q]"},
+                "timeout_s": 5,
+                "request_id": "req-press-key",
+            }
+        )
+
+        command = ws_client.receive_json()
+        assert command["kind"] == "command"
+        assert command["type"] == "press_key"
+        assert command["payload"] == {"key": "Enter", "selector": "input[name=q]"}
+
+        ws_client.send_json(
+            {
+                "kind": "result",
+                "command_id": command["command_id"],
+                "ok": True,
+                "result": {"pressed": True, "key": "Enter"},
+            }
+        )
+
+        result = ws_operator.receive_json()
+        assert result["kind"] == "command_result"
+        assert result["ok"] is True
+        assert result["result"] == {"pressed": True, "key": "Enter"}

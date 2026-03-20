@@ -54,6 +54,39 @@ def test_send_command_maps_failure(monkeypatch) -> None:
     assert "CLIENT_NOT_CONNECTED" in exc.value.message
 
 
+def test_send_command_preserves_press_key_payload(monkeypatch, capsys) -> None:
+    args = _base_args()
+    args.instance_id = "inst"
+    args.client_id = "client"
+    args.command_type = "press_key"
+    args.payload = '{"key":"Enter","selector":"input[name=q]","shift_key":true}'
+    args.timeout_s = 2.0
+    args.request_id = "req-press-key"
+
+    async def fake_send_and_recv(_args, payload):  # noqa: ANN001
+        assert payload["kind"] == "send_command"
+        assert payload["type"] == "press_key"
+        assert payload["payload"] == {"key": "Enter", "selector": "input[name=q]", "shift_key": True}
+        assert payload["request_id"] == "req-press-key"
+        return {
+            "kind": "command_result",
+            "ok": True,
+            "request_id": "req-press-key",
+            "result": {"pressed": True, "key": "Enter"},
+        }
+
+    monkeypatch.setattr(cli, "_send_and_recv", fake_send_and_recv)
+
+    code = cli.send_command(args)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    body = json.loads(out)
+    assert body["ok"] is True
+    assert body["result"]["pressed"] is True
+    assert body["result"]["key"] == "Enter"
+
+
 def test_ping_tab_maps_to_send_command(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

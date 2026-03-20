@@ -162,7 +162,7 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
 - `notes`: actionable recommendations (for example, increase `max_chars` when truncated, or set `preprocess=false` for rawer DOM)
 - `preprocess` and `removed_nodes`: preprocessing mode and removed-node count
 
-Adaptive load wait (`navigate`, `click`, `type`):
+Adaptive load wait (`navigate`, `click`, `type`, `press_key`):
 
 - Extension now waits for tab load completion before replying, but only up to 10s (adaptive: returns immediately if tab is already `complete`).
 - Override per command payload:
@@ -195,6 +195,33 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
   --type type --payload '{"selector":"input[name=\"q\"]","text":"hello world","keystroke_delay_ms":70,"keystroke_jitter_ms":45}'
 ```
 
+Special keys (`press_key`):
+
+- `press_key` is a first-class command for non-text keyboard actions such as submit, focus traversal, and Escape handling.
+- Supported keys: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `Space`.
+- Key aliases are accepted for common variants like `return`, `esc`, `del`, `up`, `down`, `left`, `right`, and `spacebar`.
+- Optional payload fields:
+  - any element targeting field already supported by actions: `selector`, `ref`, `click_ref`, or `locator`
+  - modifier flags: `alt_key`, `ctrl_key`, `meta_key`, `shift_key`
+  - `focus` (default `true`) to focus the target before dispatch
+  - `repeat` (default `false`) to mark the event as an auto-repeat keypress
+- If no target is provided, `press_key` uses the current `document.activeElement`.
+- `Enter`, `Tab`, `Backspace`, `Delete`, and `Space` include browser-like default handling when the page does not cancel the keyboard event.
+
+Examples:
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type press_key --payload '{"key":"Enter","selector":"input[name=\"q\"]"}'
+```
+
+```bash
+browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
+  send-command --instance-id local-instance --client-id chrome-main \
+  --type press_key --payload '{"key":"Tab","shift_key":true}'
+```
+
 ## Security Hardening
 
 - Use TLS in non-local deployments (`wss://`).
@@ -203,6 +230,11 @@ browser-bridge --server-ws-url ws://127.0.0.1:8765/ws/operator --token '...' \
 - Optional allowed clients allowlist in static mode: `BRIDGE_ALLOWED_CLIENTS=instance1:client1,instance2:client2`.
 - Request idempotency/replay guard is enforced by `request_id` dedup window.
 - Max payload limit is enforced by `BRIDGE_MAX_MESSAGE_BYTES`.
+
+## Extension Connection Stability
+
+- The Chrome extension runs as a Manifest V3 service worker.
+- The client now sends periodic websocket `ping` messages after `auth_ok` so Chrome does not suspend an otherwise idle remote bridge connection.
 
 ## Testing
 
